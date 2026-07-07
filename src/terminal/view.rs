@@ -711,7 +711,19 @@ impl TerminalView {
         if self.terminal.exited {
             return;
         }
-        let ks = &ev.keystroke;
+        // macOS Option-key policy (see `input::reshape_option_keystroke`):
+        // reshape the chord once, up front, so every consumer below — the ⌘
+        // dispatcher, the prompt editor, the raw PTY encoder — sees the same
+        // story. Other platforms have no composed-character split to resolve.
+        let reshaped = if cfg!(target_os = "macos") {
+            super::input::reshape_option_keystroke(
+                &ev.keystroke,
+                cx.global::<Config>().macos_option_as_alt,
+            )
+        } else {
+            None
+        };
+        let ks = reshaped.as_ref().unwrap_or(&ev.keystroke);
         let m = &ks.modifiers;
 
         // While the search field is focused it owns the keyboard — typing, caret
@@ -1046,6 +1058,36 @@ impl TerminalView {
             self.apply_readline_ctrl(key);
             cx.notify();
             return;
+        }
+
+        // Readline-style Meta word chords on the edited line: M-b / M-f motions
+        // and M-d delete-word, mirroring the Alt+←/→/Delete handling below. On
+        // macOS these are reachable only with `macos_option_as_alt` on — with it
+        // off the chord composes a character upstream and arrives here altless,
+        // through the printable-text arm. Other Alt+letter chords stay swallowed
+        // no-ops as before (the local editor can't mirror every zle widget).
+        if m.alt && !m.platform && !m.control {
+            match key {
+                "b" => {
+                    self.editor_move_h(false, m.shift, true);
+                    cx.notify();
+                    return;
+                }
+                "f" => {
+                    self.editor_move_h(true, m.shift, true);
+                    cx.notify();
+                    return;
+                }
+                "d" => {
+                    if !self.cmd.delete_selection() {
+                        self.cmd.delete_word_right();
+                    }
+                    self.history_nav = None;
+                    cx.notify();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         match key {
@@ -3902,6 +3944,45 @@ mod gpui_tests {
                 _ => continue,
             }
         }
+    }
+
+    /// Readline's Meta word chords act on the local prompt editor: M-b / M-f
+    /// move by word, M-d deletes the word right of the caret. (On macOS these
+    /// chords reach the editor only with `macos_option_as_alt` on — the
+    /// `on_key_down` reshape otherwise strips the alt bit; here we drive the
+    /// editor dispatcher directly with the post-reshape keystroke.)
+    #[gpui::test]
+    fn meta_word_chords_edit_the_prompt_line(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                let meta = |key: &str| gpui::Keystroke {
+                    modifiers: gpui::Modifiers {
+                        alt: true,
+                        ..Default::default()
+                    },
+                    key: key.to_string(),
+                    key_char: None,
+                };
+                view.cmd.set("echo hello");
+                // M-b from the end lands at the start of "hello".
+                view.handle_editor_key(&meta("b"), cx);
+                assert_eq!(view.cmd.cursor(), 5);
+                // M-d deletes the word right of the caret.
+                view.handle_editor_key(&meta("d"), cx);
+                assert_eq!(view.cmd.text(), "echo ");
+                // M-b / M-f hop the remaining word: back to its start, then
+                // forward to its end.
+                view.handle_editor_key(&meta("b"), cx);
+                assert_eq!(view.cmd.cursor(), 0);
+                view.handle_editor_key(&meta("f"), cx);
+                assert_eq!(view.cmd.cursor(), 4);
+                // Other Meta letters stay swallowed no-ops (line untouched).
+                view.handle_editor_key(&meta("z"), cx);
+                assert_eq!(view.cmd.text(), "echo ");
+                assert_eq!(view.cmd.cursor(), 4);
+            })
+            .unwrap();
     }
 
     /// A `PtyWrite` raised by the VT layer (query replies, bracketed-paste

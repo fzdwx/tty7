@@ -80,6 +80,13 @@ pub struct Config {
     pub cursor_style: CursorStyle,
 
     // ── Input / Mouse ───────────────────────────────────────────────────────
+    /// macOS only: treat the Option (⌥) key as Alt/Meta. On, an Option chord
+    /// sends the ESC-prefixed sequence Meta bindings expect (Option+B → `ESC b`,
+    /// readline's backward-word), like Ghostty's `macos-option-as-alt` /
+    /// iTerm2's "Option as Meta". Off (the default), Option keeps its macOS
+    /// role of composing special characters (Option+B → `∫`). Ignored on other
+    /// platforms, where Alt always carries the Meta meaning.
+    pub macos_option_as_alt: bool,
     /// Hide the OS mouse pointer while typing; it reappears on the next mouse
     /// move. Off by default.
     pub mouse_hide_while_typing: bool,
@@ -243,10 +250,12 @@ impl Default for Config {
             // outdated is the status quo we're fixing. One cheap GET at startup.
             check_for_updates: true,
             cursor_style: CursorStyle::Block,
-            // Input/mouse defaults preserve today's behavior: GPUI already hides
-            // the pointer while typing (its `CursorHideMode` default), so this
-            // starts `true`; no focus-follows-mouse, raw 1× scroll, no copy trim,
-            // a normal centered window.
+            // Input/mouse defaults preserve today's behavior: Option composes
+            // characters as macOS ships it (opt into Option-as-Meta); GPUI
+            // already hides the pointer while typing (its `CursorHideMode`
+            // default), so that starts `true`; no focus-follows-mouse, raw 1×
+            // scroll, no copy trim, a normal centered window.
+            macos_option_as_alt: false,
             mouse_hide_while_typing: true,
             focus_follows_mouse: false,
             mouse_scroll_multiplier: 1.0,

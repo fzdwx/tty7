@@ -604,6 +604,12 @@ impl Tty7App {
 
     // ── Input / Mouse setters ───────────────────────────────────────────────
 
+    /// Takes effect on the next keystroke — the terminal reads the flag per
+    /// key event, so nothing needs pushing to open panes.
+    pub(crate) fn set_macos_option_as_alt(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.macos_option_as_alt = on);
+    }
+
     pub(crate) fn set_mouse_hide_while_typing(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.mouse_hide_while_typing = on);
         // Push the new policy to GPUI right away (same call the hot-reload uses).

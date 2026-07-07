@@ -845,6 +845,7 @@ impl Tty7App {
         let link_url = cfg.link_url;
         let mouse_hide = cfg.mouse_hide_while_typing;
         let focus_follows = cfg.focus_follows_mouse;
+        let option_as_alt = cfg.macos_option_as_alt;
         let scroll_mult = cfg.mouse_scroll_multiplier;
         let clip_trim = cfg.clipboard_trim_trailing_spaces;
         // Map the persisted scrollback depth onto its preset radio index (default
@@ -911,6 +912,23 @@ impl Tty7App {
             .checked(clip_trim)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_clipboard_trim(*on, cx)))
             .into_any_element();
+        // macOS only: the Option/special-character split this toggle resolves
+        // doesn't exist on other platforms, where Alt always carries Meta.
+        let option_alt_row = cfg!(target_os = "macos").then(|| {
+            let switch = Switch::new("term-option-as-alt")
+                .checked(option_as_alt)
+                .on_click(
+                    cx.listener(|this, on: &bool, _w, cx| this.set_macos_option_as_alt(*on, cx)),
+                )
+                .into_any_element();
+            self.settings_row(
+                "Option (⌥) acts as Meta",
+                "⌥+key sends the escape chord shells expect (⌥B = back one word) \
+                 instead of typing a special character (∫).",
+                switch,
+                cx,
+            )
+        });
         // Slider + a live readout of the current multiplier beside it.
         let scroll_control = h_flex()
             .items_center()
@@ -954,6 +972,11 @@ impl Tty7App {
                 mouse_hide_switch,
                 cx,
             ))
+            .when_some(option_alt_row, |v, row| {
+                v.child(self.section_rule(cx))
+                    .child(self.section_header("Keyboard", cx))
+                    .child(row)
+            })
             .child(self.section_rule(cx))
             .child(self.section_header("Links", cx))
             .child(self.settings_row(
