@@ -16,6 +16,7 @@ use anyhow::{Context as _, Result};
 use gpui::http_client::{AsyncBody, HttpClient as _, HttpRequestExt as _, RedirectPolicy};
 use gpui::{AnyWindowHandle, App, AsyncApp, Global, PromptLevel, Window, http_client};
 use reqwest_client::ReqwestClient;
+use smol::future::FutureExt as _;
 use smol::io::AsyncReadExt as _;
 use std::time::Duration;
 
@@ -29,6 +30,12 @@ const REPO: &str = "l0ng-ai/tty7";
 /// resolves to the newest published (non-prerelease) build, so it never goes
 /// stale as versions roll — no need to embed a specific tag.
 pub const RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/latest";
+
+/// Overall wall-clock budget for the check. `ReqwestClient` only sets a *connect*
+/// timeout, so without this a connected-but-stalled response could sit pending
+/// for the whole session; racing a timer keeps the "fail soft" behavior
+/// deterministic instead of open-ended.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A newer release than the one currently running.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,7 +71,15 @@ pub fn spawn_check(cx: &mut App) {
 
     cx.spawn(async move |cx| {
         let current = env!("CARGO_PKG_VERSION");
-        let latest = match fetch_latest_version().await {
+        // Race the fetch against a timer so a stalled connection can't leave the
+        // task pending forever; whichever finishes first wins.
+        let latest = match fetch_latest_version()
+            .or(async {
+                cx.background_executor().timer(CHECK_TIMEOUT).await;
+                Err(anyhow::anyhow!("timed out after {CHECK_TIMEOUT:?}"))
+            })
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 // `{e:#}` includes the anyhow context chain; kept at debug so a
@@ -272,7 +287,10 @@ async fn fetch_latest_version() -> Result<String> {
 /// Missing minor/patch components read as `0`. Returns `None` if the numeric
 /// core doesn't parse — the caller treats that as "don't prompt".
 fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
-    let core = s.trim().trim_start_matches('v');
+    let trimmed = s.trim();
+    // Strip a single optional `v` prefix. `strip_prefix` (not `trim_start_matches`)
+    // so a doubled `vv0.3.1` fails to parse instead of silently losing the extra v.
+    let core = trimmed.strip_prefix('v').unwrap_or(trimmed);
     // A pre-release/build tag (`0.4.0-rc.1`, `0.4.0+ci`) compares by its release
     // core here; we don't ship pre-releases, so finer ordering isn't worth it.
     let core = core.split(['-', '+']).next().unwrap_or(core);
@@ -280,6 +298,11 @@ fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next().unwrap_or("0").parse().ok()?;
     let patch = parts.next().unwrap_or("0").parse().ok()?;
+    // Reject extra components (`0.3.1.1`) rather than truncating them: an
+    // unrecognizable tag must never surface a bogus "update available".
+    if parts.next().is_some() {
+        return None;
+    }
     Some((major, minor, patch))
 }
 
@@ -311,6 +334,11 @@ mod tests {
         // Garbage yields None.
         assert_eq!(parse_version("nightly"), None);
         assert_eq!(parse_version(""), None);
+        // Malformed cores are rejected, not truncated into a bogus version:
+        // extra components or a doubled prefix must not parse.
+        assert_eq!(parse_version("v0.3.1.1"), None);
+        assert_eq!(parse_version("0.3.1.0"), None);
+        assert_eq!(parse_version("vv0.3.1"), None);
     }
 
     #[test]
@@ -331,6 +359,9 @@ mod tests {
     fn unparseable_tag_never_prompts() {
         assert!(!is_update_available("garbage", "0.3.0"));
         assert!(!is_update_available("v0.3.1", "garbage"));
+        // A malformed newer-looking tag must not surface a bogus update.
+        assert!(!is_update_available("v0.4.0.1", "0.3.0"));
+        assert!(!is_update_available("vv0.4.0", "0.3.0"));
     }
 
     #[test]
