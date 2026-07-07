@@ -52,8 +52,9 @@ jobs:
             libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev \
             libwayland-dev libx11-dev libxcb1-dev libzstd-dev libssl-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-07
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
