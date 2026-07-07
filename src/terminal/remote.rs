@@ -30,7 +30,7 @@ use std::thread::JoinHandle;
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi;
 
 use crate::core::osc::OscTokenizer;
@@ -86,6 +86,17 @@ struct ShellState {
     last_exit: Option<i32>,
 }
 
+/// The shared handles the reader thread writes into as daemon frames arrive;
+/// `RemoteTerminal` keeps the other ends for the view to read. Bundled so
+/// `spawn_reader`'s signature stays readable as signals accrue.
+struct ReaderSignals {
+    cwd: Arc<Mutex<Option<PathBuf>>>,
+    shell: Arc<Mutex<ShellState>>,
+    exited: Arc<AtomicBool>,
+    child_exited: Arc<AtomicBool>,
+    zle_reading: Arc<AtomicBool>,
+}
+
 /// A terminal whose PTY lives in the daemon. Mirrors `backend::Terminal`'s public
 /// surface so the view can treat the two interchangeably.
 pub struct RemoteTerminal {
@@ -117,6 +128,14 @@ pub struct RemoteTerminal {
     /// Set true by the reader thread once the child exits or the daemon
     /// disconnects. `poll_exited()` copies this into the `exited` field.
     exited_flag: Arc<AtomicBool>,
+    /// Set true only on a *genuine* child exit (`DaemonMsg::Exited` — the
+    /// shell ended: `exit`, Ctrl-D, a crash), never on a daemon disconnect or
+    /// protocol desync, which also flip `exited_flag`. The distinction gates
+    /// pane auto-close: a pane whose shell ended closes itself, while a pane
+    /// that merely lost its connection stays visible (auto-closing it would
+    /// silently discard — and `close_tab` would try to kill — a session that
+    /// may still be alive daemon-side).
+    child_exited: Arc<AtomicBool>,
     /// Whether zle is reading the keyboard right now, sniffed client-side from
     /// *live* OSC 133 marks: `B` (prompt end — zle takes over immediately
     /// after) arms it, any other mark disarms it, and Snapshot replays never
@@ -202,16 +221,20 @@ impl RemoteTerminal {
         let cwd: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let shell_state: Arc<Mutex<ShellState>> = Arc::new(Mutex::new(ShellState::default()));
         let exited_flag = Arc::new(AtomicBool::new(false));
+        let child_exited = Arc::new(AtomicBool::new(false));
         let zle_reading = Arc::new(AtomicBool::new(false));
 
         let reader_thread = Self::spawn_reader(
             term.clone(),
             proxy,
             read_half,
-            cwd.clone(),
-            shell_state.clone(),
-            exited_flag.clone(),
-            zle_reading.clone(),
+            ReaderSignals {
+                cwd: cwd.clone(),
+                shell: shell_state.clone(),
+                exited: exited_flag.clone(),
+                child_exited: child_exited.clone(),
+                zle_reading: zle_reading.clone(),
+            },
         );
 
         Ok(Self {
@@ -225,6 +248,7 @@ impl RemoteTerminal {
             cwd,
             shell_state,
             exited_flag,
+            child_exited,
             zle_reading,
             reader_thread: Some(reader_thread),
         })
@@ -246,14 +270,18 @@ impl RemoteTerminal {
         term: Arc<FairMutex<Term<EventProxy>>>,
         proxy: EventProxy,
         read_half: Stream,
-        cwd: Arc<Mutex<Option<PathBuf>>>,
-        shell: Arc<Mutex<ShellState>>,
-        exited_flag: Arc<AtomicBool>,
-        zle_reading: Arc<AtomicBool>,
+        signals: ReaderSignals,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
             .name("tty7-remote-reader".to_string())
             .spawn(move || {
+                let ReaderSignals {
+                    cwd,
+                    shell,
+                    exited: exited_flag,
+                    child_exited,
+                    zle_reading,
+                } = signals;
                 // The client end of the visible-output path: keep it off the
                 // efficiency cores (see `core::threads`).
                 crate::core::threads::promote_to_user_interactive();
@@ -448,12 +476,45 @@ impl RemoteTerminal {
                                         last_exit,
                                     };
                                 }
+                                // The shell just reported a fresh prompt, so at
+                                // this position in the byte stream no full-screen
+                                // program owns the pane. Any TUI state still in
+                                // the grid — a stranded alt screen, a DECTCEM-
+                                // hidden cursor, mouse/focus reporting, kitty
+                                // keyboard flags — is residue from a program that
+                                // died without restoring it (an ssh session
+                                // dropping mid-TUI is the canonical case: the
+                                // restore sequences can never arrive). Feed the
+                                // resets through the same parser path as PTY
+                                // output, right here between frames: every byte
+                                // the dead program did send has already applied
+                                // (`flush_batch!` above), and the prompt text /
+                                // next command's bytes only come in later frames,
+                                // so this can never fight a live program's own
+                                // mode changes. Runs on the attach path too —
+                                // the daemon sends `Prompt` after `Snapshot` —
+                                // so a stale replay ring self-heals on reattach.
+                                if active && at_prompt {
+                                    let mut term = term.lock();
+                                    let resets = stale_mode_resets(*term.mode());
+                                    if !resets.is_empty() {
+                                        processor.advance(&mut *term, &resets);
+                                        drop(term);
+                                        proxy.send_event(AlacEvent::Wakeup);
+                                    }
+                                }
                             }
                             DaemonMsg::Exited { .. } => {
                                 // Child gone: apply what it printed last, then
                                 // mark the emulator exited and flip the shared
                                 // flag so the next `poll_exited()` surfaces it.
+                                // This is the one exit path where the child
+                                // *really* ended (vs the connection dying), so
+                                // record that before the teardown's events fire
+                                // — the view reads it to decide whether the
+                                // pane should close itself.
                                 flush_batch!();
+                                child_exited.store(true, Ordering::SeqCst);
                                 teardown();
                                 break 'main;
                             }
@@ -552,6 +613,12 @@ impl RemoteTerminal {
         if self.exited_flag.load(Ordering::SeqCst) {
             self.exited = true;
         }
+    }
+
+    /// Whether the pane's child process genuinely exited (as opposed to the
+    /// daemon connection dropping — see the `child_exited` field docs).
+    pub fn child_exited(&self) -> bool {
+        self.child_exited.load(Ordering::SeqCst)
     }
 
     /// Send raw bytes (keyboard input, pasted text, query replies) to the pane as
@@ -685,6 +752,50 @@ impl Drop for RemoteTerminal {
             let _ = handle.join();
         }
     }
+}
+
+/// The reset sequence that clears stale full-screen-TUI state from a grid that
+/// provably has no full-screen owner (the shell just drew its prompt). Each
+/// reset is emitted only when the corresponding mode is actually set, because
+/// some are not idempotent when idle: `?1049l` on the primary screen performs
+/// a cursor *restore*, so it must never fire as a blanket reset.
+///
+/// Deliberately left alone: bracketed paste and application cursor keys —
+/// zle/fish own those around the prompt and re-arm them on every read, so
+/// resetting here could race the line editor's own enable — and anything the
+/// parser doesn't track (nothing to detect staleness against).
+fn stale_mode_resets(mode: TermMode) -> Vec<u8> {
+    let mut seq = Vec::new();
+    // Leave the alternate screen first: the resets below then apply to the
+    // primary screen's state (kitty keyboard flags are tracked per screen).
+    if mode.contains(TermMode::ALT_SCREEN) {
+        seq.extend_from_slice(b"\x1b[?1049l");
+    }
+    if !mode.contains(TermMode::SHOW_CURSOR) {
+        seq.extend_from_slice(b"\x1b[?25h");
+    }
+    if mode.intersects(TermMode::MOUSE_MODE) {
+        seq.extend_from_slice(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l");
+    }
+    if mode.contains(TermMode::SGR_MOUSE) {
+        seq.extend_from_slice(b"\x1b[?1006l");
+    }
+    if mode.contains(TermMode::UTF8_MOUSE) {
+        seq.extend_from_slice(b"\x1b[?1005l");
+    }
+    if mode.contains(TermMode::FOCUS_IN_OUT) {
+        seq.extend_from_slice(b"\x1b[?1004l");
+    }
+    // While ALT_SCREEN is set, `mode` shows the *alt* screen's kitty flags;
+    // the `?1049l` above restores the primary screen's stack, which may
+    // itself be polluted (e.g. a remote kitty-protocol app ran before the
+    // TUI that died). So zero the flags whenever either screen could be
+    // dirty — at a shell prompt zero is always correct, since kitty-aware
+    // line editors re-arm on every read.
+    if mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL) || mode.contains(TermMode::ALT_SCREEN) {
+        seq.extend_from_slice(b"\x1b[=0;1u");
+    }
+    seq
 }
 
 /// Post a best-effort desktop notification via `notify-rust`. The single
@@ -892,6 +1003,132 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(term.exited_flag.load(Ordering::SeqCst));
+    }
+
+    /// A `DaemonMsg::Exited` frame (the child really ended) must set
+    /// `child_exited`; a bare daemon disconnect (EOF) must not — both flip
+    /// `exited_flag`. The distinction is what keeps pane auto-close from
+    /// firing on a lost connection and destroying a session that may still be
+    /// alive daemon-side.
+    #[test]
+    fn child_exit_is_distinguished_from_daemon_disconnect() {
+        // A genuine child exit: the daemon reports it explicitly.
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        DaemonMsg::Exited { code: Some(0) }
+            .encode(&mut daemon_side)
+            .unwrap();
+        for _ in 0..200 {
+            if term.exited_flag.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(term.exited_flag.load(Ordering::SeqCst));
+        assert!(
+            term.child_exited(),
+            "an Exited frame is a genuine child exit"
+        );
+
+        // A daemon disconnect: the socket just closes.
+        let (client_side, daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        drop(daemon_side);
+        for _ in 0..200 {
+            if term.exited_flag.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(term.exited_flag.load(Ordering::SeqCst));
+        assert!(
+            !term.child_exited(),
+            "a disconnect is not a child exit — auto-close must not fire"
+        );
+    }
+
+    /// `stale_mode_resets` maps each residue bit to its reset — and nothing
+    /// more. The guards matter as much as the resets: `?1049l` on a grid that
+    /// is *not* on the alt screen performs a cursor restore, so a clean (or
+    /// merely cursor-hidden) mode must never emit it.
+    #[test]
+    fn stale_mode_resets_target_only_the_dirty_bits() {
+        // A healthy prompt-time mode: nothing to reset.
+        let clean = TermMode::SHOW_CURSOR | TermMode::LINE_WRAP | TermMode::BRACKETED_PASTE;
+        assert!(stale_mode_resets(clean).is_empty());
+
+        // Hidden cursor alone (a Claude-Code-style TUI, no alt screen):
+        // exactly `?25h`, and crucially no `?1049l`.
+        let hidden = TermMode::LINE_WRAP;
+        assert_eq!(stale_mode_resets(hidden), b"\x1b[?25h");
+
+        // The full ssh-drop-mid-htop residue: alt screen + hidden cursor +
+        // mouse reporting. The alt-screen exit leads (later resets must land
+        // on the primary screen), and the kitty zeroing rides along because
+        // the primary screen's flags are unobservable from the alt screen.
+        let residue = TermMode::ALT_SCREEN | TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE;
+        let seq = stale_mode_resets(residue);
+        let text = String::from_utf8_lossy(&seq).into_owned();
+        assert!(text.starts_with("\x1b[?1049l"));
+        assert!(text.contains("\x1b[?25h"));
+        assert!(text.contains("\x1b[?1002l"));
+        assert!(text.contains("\x1b[?1006l"));
+        assert!(text.ends_with("\x1b[=0;1u"));
+
+        // Kitty keyboard flags alone (the same drop during a kitty-protocol
+        // app): just the zeroing, nothing screen-related.
+        let kitty = TermMode::SHOW_CURSOR | TermMode::DISAMBIGUATE_ESC_CODES;
+        assert_eq!(stale_mode_resets(kitty), b"\x1b[=0;1u");
+    }
+
+    /// End-to-end through the reader thread: a TUI's mode changes arrive as
+    /// `Output`, the connection "dies" (no restore sequences), and the host
+    /// shell's next prompt report must scrub the residue from the local grid.
+    /// This is the ssh-drop-mid-TUI bug at the transport level.
+    #[test]
+    fn prompt_report_scrubs_stale_tui_modes() {
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // htop over ssh: alt screen, hidden cursor, drag + SGR mouse. Then the
+        // network drops — no `?1049l`/`?25h`/mouse-off ever arrives.
+        DaemonMsg::Output(b"\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        // ssh exits; the host shell's integration reports a fresh prompt.
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(255),
+        }
+        .encode(&mut daemon_side)
+        .unwrap();
+        daemon_side.flush().unwrap();
+
+        let mut mode = TermMode::NONE;
+        for _ in 0..200 {
+            mode = *term.term.lock().mode();
+            let scrubbed = !mode.contains(TermMode::ALT_SCREEN)
+                && mode.contains(TermMode::SHOW_CURSOR)
+                && !mode.intersects(TermMode::MOUSE_MODE)
+                && !mode.contains(TermMode::SGR_MOUSE);
+            if scrubbed && term.at_prompt() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !mode.contains(TermMode::ALT_SCREEN),
+            "the prompt report must pull the grid off the stranded alt screen"
+        );
+        assert!(
+            mode.contains(TermMode::SHOW_CURSOR),
+            "the prompt report must re-show the DECTCEM-hidden cursor"
+        );
+        assert!(
+            !mode.intersects(TermMode::MOUSE_MODE) && !mode.contains(TermMode::SGR_MOUSE),
+            "the prompt report must disable stale mouse reporting"
+        );
     }
 
     /// Regression for the "restored pane types `11;rgb:…` at the prompt" bug:

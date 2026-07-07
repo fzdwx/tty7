@@ -19,6 +19,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Typing `exit` (or Ctrl-D) left a dead "process exited" pane behind instead
+  of closing it. A pane whose shell genuinely ends now closes itself —
+  collapsing its split, or closing the tab when it was the only pane (the
+  last tab falls back to the home page), like every other terminal. A pane
+  that merely *lost its daemon connection* still stays visible: auto-closing
+  those would silently discard — and kill — sessions that may still be alive
+  daemon-side. Panes that died while detached clean themselves up on the next
+  attach the same way.
+
+- A full-screen TUI dying without restoring the terminal — the canonical case
+  being an ssh session dropping mid-`htop`/`vim` — left the pane stranded on
+  the alt screen with a hidden cursor and live mouse reporting: a visible
+  prompt with no cursor anywhere, mouse clicks echoing `0;19;42M`-style junk,
+  and broken scrollback. The client now scrubs this residue the moment the
+  shell reports its next prompt (OSC 133): it leaves the stranded alt screen,
+  re-shows the DECTCEM-hidden cursor, and disables stale mouse/focus reporting
+  and kitty keyboard flags — each reset only when its mode is actually set.
+  Reattach self-heals the same way, since the daemon replays the prompt state
+  after the ring.
+
 - Windows shell integration never engaged even for the default shell: detection
   keyed off `portable-pty`'s `get_shell()`, which reports `%ComSpec%` (cmd.exe)
   regardless of what's actually spawned, so the PowerShell default was mistaken

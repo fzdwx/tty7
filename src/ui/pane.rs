@@ -213,6 +213,14 @@ impl Pane<Entity<TerminalView>> {
         self.close_leaf_where(&|v| v.read(cx).focus_handle.contains_focused(window, cx))
     }
 
+    /// Remove a specific leaf (matched by entity identity), collapsing its
+    /// parent split into the sibling. Used when a pane closes for a reason
+    /// other than user focus — its child exited on its own — so the leaf to
+    /// remove is the exited one, wherever focus happens to be.
+    pub fn close_leaf(&mut self, target: &Entity<TerminalView>) -> CloseOutcome {
+        self.close_leaf_where(&|v| v.entity_id() == target.entity_id())
+    }
+
     /// Render the subtree. `show_focus` draws a focus ring on the active leaf
     /// (suppressed when the tab has a single pane).
     pub fn render(&self, show_focus: bool, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
