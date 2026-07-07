@@ -4,7 +4,7 @@
 
 ### tty7
 
-**A blazing-fast terminal in pure Rust — GPU-rendered, and built around the prompt.**
+**A fast, GPU-rendered terminal in pure Rust.**
 
 <sub>GPU rendering on Zed's gpui · VT core from Alacritty</sub>
 
@@ -26,18 +26,18 @@
 
 <br />
 
-tty7 is a terminal that puts speed and the prompt first. Every frame renders on
-the GPU, output drains faster than any terminal we've measured — an 11 MB `cat`
-in **95 ms** — and the prompt itself does real work: inline completion, syntax
-highlighting, and flag-by-flag hints for the commands you type all day. Pure
-Rust, native on macOS, Windows, and Linux, zero configuration to get there.
+tty7 is a GPU-rendered terminal. An 11 MB `cat` finishes in **95 ms** — about
+2× faster than Alacritty, Ghostty, or Kitty on the same hardware — and the
+built-in prompt gives you inline completion, syntax highlighting, and per-flag
+hints for common commands. Pure Rust, native on macOS, Windows, and Linux, no
+configuration needed.
 
-- ⚡ **Fastest in its class** — an 11 MB `cat` completes in **95 ms**, versus
+- ⚡ **Fast** — an 11 MB `cat` completes in **95 ms**, versus
   179–239 ms for Alacritty/Ghostty/Kitty; DOOM-fire renders at **888 fps**
   against their 485–617. Same machine, same grid; the harness is in the repo
   ([benchmarks](#-benchmarks)).
-- ⌨️ **A prompt that helps you type** — inline completion, syntax highlighting,
-  history, and in-terminal search, right where you're working. Type
+- ⌨️ **Prompt with completions** — inline completion, syntax highlighting,
+  history, and in-terminal search. Type
   `git commit --`, `kubectl`, or `npm` and every flag and subcommand shows up
   with its description — rich signatures for ~100 common commands, generated
   from Fig's spec corpus.
@@ -108,7 +108,8 @@ The essentials:
 | <kbd>⌘ T</kbd> · <kbd>⌘ W</kbd> · <kbd>⌘ ⇧ T</kbd> | new tab · close tab · reopen closed tab |
 | <kbd>⌘ D</kbd> · <kbd>⌘ ⇧ D</kbd> | split right · split down |
 | <kbd>⌘ ]</kbd> · <kbd>⌘ [</kbd> | next pane · previous pane |
-| <kbd>⌘ ⏎</kbd> | maximize / restore the pane |
+| <kbd>⌘ ⏎</kbd> · <kbd>⌘ ⇧ ⏎</kbd> | toggle fullscreen · maximize / restore the pane |
+| <kbd>⌘ K</kbd> | clear the screen and scrollback |
 | <kbd>⌘ P</kbd> | command palette |
 | <kbd>⌘ F</kbd> | search the scrollback |
 | <kbd>⌃ R</kbd> | reverse-search shell history |
@@ -139,6 +140,6 @@ Bug reports and PRs are welcome. Security issues go through
 
 <img src="assets/app-icon.svg" alt="" width="28" height="28" />
 
-<sub><b>tty7</b> — a blazing-fast terminal in pure Rust, GPU-rendered and built around the prompt.</sub>
+<sub><b>tty7</b> — a fast, GPU-rendered terminal in pure Rust.</sub>
 
 </div>

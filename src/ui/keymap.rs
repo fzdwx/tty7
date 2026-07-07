@@ -7,6 +7,7 @@ use gpui::{App, KeyBinding};
 
 use crate::core::actions::*;
 use crate::core::config::Config;
+use crate::terminal::view::ClearScrollback;
 use crate::ui::theme::set_menus;
 
 /// Install the application menu bar, keybindings, and global actions.
@@ -72,7 +73,13 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("ResetFontSize", "secondary-0"),
         ("TogglePalette", "secondary-p"),
         ("ReopenClosedTab", "secondary-shift-t"),
-        ("ToggleMaximizePane", "secondary-enter"),
+        // ⌘⏎ toggles window fullscreen and ⌘⇧⏎ zooms the focused pane, matching
+        // Ghostty's and iTerm2's defaults — pane zoom deliberately does NOT own
+        // the bare ⌘⏎, which users expect to affect the whole window.
+        ("ToggleMaximizePane", "secondary-shift-enter"),
+        ("ToggleFullscreen", "secondary-enter"),
+        // Like Terminal.app / iTerm2 / Ghostty ⌘K: wipe the screen + scrollback.
+        ("ClearScrollback", "secondary-k"),
         ("OpenSettings", "secondary-,"),
         ("Quit", "secondary-q"),
     ]
@@ -185,6 +192,11 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "TogglePalette" => KeyBinding::new(keystroke, TogglePalette, None),
         "ReopenClosedTab" => KeyBinding::new(keystroke, ReopenClosedTab, None),
         "ToggleMaximizePane" => KeyBinding::new(keystroke, ToggleMaximizePane, None),
+        "ToggleFullscreen" => KeyBinding::new(keystroke, ToggleFullscreen, None),
+        // Terminal-scoped (the handler lives on the terminal surface): the "Terminal"
+        // context keeps ⌘K inert in the settings tab / home page instead of binding a
+        // dead global chord there.
+        "ClearScrollback" => KeyBinding::new(keystroke, ClearScrollback, Some("Terminal")),
         "OpenSettings" => KeyBinding::new(keystroke, OpenSettings, None),
         "Quit" => KeyBinding::new(keystroke, Quit, None),
         _ => return None,
