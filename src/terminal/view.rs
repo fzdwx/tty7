@@ -3967,4 +3967,81 @@ mod gpui_tests {
             "a Hidden shape must not collapse the editor anchor to the top-left corner"
         );
     }
+
+    /// Regression for the "cursor vanishes after an ssh session dies mid-TUI"
+    /// bug. Over ssh, a remote full-screen TUI entered the alt screen and hid
+    /// the cursor (`\e[?1049h\e[?25l`). The network then drops: the restore
+    /// sequences (`\e[?25h`, `\e[?1049l`) never arrive, ssh exits, and the
+    /// *host* shell draws its prompt (reported via OSC 133 → `Prompt`).
+    ///
+    /// Before the prompt-time scrub in the remote reader (see
+    /// `stale_mode_resets`), the grid stayed stranded on the alt screen with
+    /// a `Hidden` cursor shape, so *neither* cursor painted:
+    /// `element::build_grid` filters hidden grid cursors, and the inline
+    /// editor (which would ignore the stale-Hidden shape, see the test above)
+    /// never engaged because `input_active()` requires being off the alt
+    /// screen — a visible prompt with no cursor anywhere. The prompt report
+    /// must instead scrub the residue: off the alt screen, cursor shown,
+    /// editor live again.
+    #[gpui::test]
+    fn ssh_drop_mid_tui_recovers_at_the_next_prompt(cx: &mut TestAppContext) {
+        use alacritty_terminal::vte::ansi::CursorShape;
+
+        let (window, mut daemon) = harness(cx);
+
+        // Bytes that arrived over ssh before the drop: the remote TUI enters
+        // the alt screen and hides the cursor. The connection dies before any
+        // restore sequence is sent.
+        DaemonMsg::Output(b"\x1b[?1049h\x1b[?25l".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        // ssh exits; the host shell's integration reports a fresh prompt.
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(255), // ssh's exit code after a connection loss
+        }
+        .encode(&mut daemon)
+        .unwrap();
+
+        let mut state = (false, true, true);
+        for _ in 0..400 {
+            cx.run_until_parked();
+            state = window
+                .update(cx, |view, _, _| {
+                    let hidden = matches!(
+                        view.terminal.term.lock().renderable_content().cursor.shape,
+                        CursorShape::Hidden
+                    );
+                    (view.at_shell_prompt(), view.on_alt_screen(), hidden)
+                })
+                .unwrap();
+            if state == (true, false, false) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let (at_prompt, on_alt, hidden) = state;
+        assert!(at_prompt, "the host shell is back at its prompt");
+        assert!(
+            !on_alt,
+            "the prompt report must pull the grid off the stranded alt screen"
+        );
+        assert!(
+            !hidden,
+            "the prompt report must re-show the DECTCEM-hidden cursor"
+        );
+
+        // With the residue scrubbed, the inline editor engages and owns the
+        // caret again — the user sees a cursor at the prompt.
+        window
+            .update(cx, |view, _, _| {
+                assert!(
+                    view.input_active(),
+                    "off the alt screen and at the prompt, the editor is live"
+                );
+            })
+            .unwrap();
+    }
 }
