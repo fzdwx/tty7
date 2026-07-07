@@ -14,7 +14,7 @@ use gpui_component::{ActiveTheme as _, IndexPath, TitleBar};
 use crate::core::actions::*;
 use crate::core::config::{Config, NewTabPosition, ShellConfig, color_or, hsla_to_hex6};
 use crate::core::session::{Session, SessionAxis, SessionPane, SessionTab};
-use crate::terminal::view::TerminalView;
+use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Pane};
 use crate::ui::settings::{ColorKey, SettingsSection, SettingsState};
@@ -740,6 +740,46 @@ impl Tty7App {
                     crate::terminal::RemoteTerminal::kill_pane(leaf.read(cx).pane_id);
                 }
                 self.focus_active(window, cx);
+                self.save_session(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Close the pane whose shell just exited on its own (`ChildExited` from
+    /// the view — `exit`, Ctrl-D, a crashed shell): collapse its split, or
+    /// close its tab when it was the only pane. Unlike `close_pane` this
+    /// targets the *emitting* leaf, not the focused one — the exit can happen
+    /// in a background tab. The daemon pane is killed even though its child is
+    /// already dead: the daemon still lists it for reattach, and killing is
+    /// what drops it from the session.
+    fn on_child_exited(
+        &mut self,
+        view: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = view.entity_id();
+        let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.pane.leaves().iter().any(|l| l.entity_id() == id))
+        else {
+            return; // already closed (e.g. by the user racing the exit)
+        };
+        match self.tabs[index].pane.close_leaf(&view) {
+            // The exited pane was the tab's only leaf: close the whole tab
+            // (which snapshots it for reopen and kills its daemon panes).
+            CloseOutcome::RemoveSelf => self.close_tab(index, window, cx),
+            // Unreachable — containment was just checked — but never close a
+            // tab we failed to locate the leaf in.
+            CloseOutcome::NotFound => {}
+            CloseOutcome::Collapsed => {
+                crate::terminal::RemoteTerminal::kill_pane(view.read(cx).pane_id);
+                if index == self.active {
+                    self.maximized = None;
+                    self.focus_active(window, cx);
+                }
                 self.save_session(cx);
                 cx.notify();
             }
@@ -1813,11 +1853,21 @@ fn new_terminal(
     window: &mut Window,
     cx: &mut Context<Tty7App>,
 ) -> Entity<TerminalView> {
-    cx.new(|cx| {
+    let view = cx.new(|cx| {
         let mut view = TerminalView::new(working_directory, restore_pane, window, cx)
             .expect("failed to start terminal");
         // Inherit the current global font size so new panes match existing ones.
         view.font_size = px(font_size);
         view
+    });
+    // A pane whose shell exits on its own (`exit`, Ctrl-D, a crash) closes
+    // itself, like every other terminal. This is the single place all panes
+    // are built — new tab, split, session restore — so the subscription
+    // covers them all; restore even cleans up panes that died while no
+    // client was attached (the daemon replays their exit on reattach).
+    cx.subscribe_in(&view, window, |app, view, _: &ChildExited, window, cx| {
+        app.on_child_exited(view.clone(), window, cx);
     })
+    .detach();
+    view
 }

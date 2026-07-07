@@ -43,6 +43,15 @@ actions!(
     ]
 );
 
+/// Emitted when the pane's child process has genuinely exited (`exit`,
+/// Ctrl-D, a crashed shell) — as opposed to the daemon connection dropping,
+/// which keeps the dead pane visible. `Tty7App` subscribes (see
+/// `new_terminal`) and closes the pane in response: collapsing its split, or
+/// closing the tab when it was the only pane.
+pub struct ChildExited;
+
+impl gpui::EventEmitter<ChildExited> for TerminalView {}
+
 pub struct TerminalView {
     pub terminal: RemoteTerminal,
     /// Daemon-assigned id of the pane this view mirrors. Persisted in the session
@@ -619,6 +628,14 @@ impl TerminalView {
             AlacEvent::ChildExit(_) | AlacEvent::Exit => {
                 self.terminal.exited = true;
                 self.title = "tty7 — process exited".to_string();
+                // A genuine child exit closes the pane (the app subscribes and
+                // collapses the split / closes the tab). A daemon disconnect
+                // reaches this same arm but must NOT auto-close: the session
+                // may still be alive daemon-side, and closing would both hide
+                // the failure and kill the pane.
+                if self.terminal.child_exited() {
+                    cx.emit(ChildExited);
+                }
                 cx.notify();
             }
             AlacEvent::ClipboardStore(_, text) => {
@@ -3998,5 +4015,136 @@ mod gpui_tests {
             Some((3, 10)),
             "a Hidden shape must not collapse the editor anchor to the top-left corner"
         );
+    }
+
+    /// A genuine child exit (`DaemonMsg::Exited`) must surface as a
+    /// `ChildExited` gpui event — the app's cue to close the pane/tab (the
+    /// "typing `exit` leaves a dead pane behind" bug). A daemon disconnect
+    /// marks the view exited through the same `AlacEvent::Exit` arm but must
+    /// emit nothing: auto-closing on a lost connection would silently discard
+    /// (and kill) a pane that may still be alive daemon-side.
+    #[gpui::test]
+    fn child_exit_emits_the_close_event_but_disconnect_does_not(cx: &mut TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let subscribe = |window: &gpui::WindowHandle<TerminalView>, cx: &mut TestAppContext| {
+            let got = Rc::new(Cell::new(false));
+            let seen = got.clone();
+            window
+                .update(cx, |_, _, cx| {
+                    let this = cx.entity();
+                    cx.subscribe(&this, move |_, _, _: &ChildExited, _| seen.set(true))
+                        .detach();
+                })
+                .unwrap();
+            got
+        };
+        let wait_exited = |window: &gpui::WindowHandle<TerminalView>, cx: &mut TestAppContext| {
+            for _ in 0..400 {
+                cx.run_until_parked();
+                let exited = window
+                    .update(cx, |view, _, _| view.terminal.exited)
+                    .unwrap();
+                if exited {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!("the view never noticed the exit");
+        };
+
+        // The child really exits: the daemon says so.
+        let (window, mut daemon) = harness(cx);
+        let got = subscribe(&window, cx);
+        DaemonMsg::Exited { code: Some(0) }
+            .encode(&mut daemon)
+            .unwrap();
+        wait_exited(&window, cx);
+        assert!(got.get(), "a genuine child exit must emit ChildExited");
+
+        // The connection just drops.
+        let (window, daemon) = harness(cx);
+        let got = subscribe(&window, cx);
+        drop(daemon);
+        wait_exited(&window, cx);
+        assert!(!got.get(), "a daemon disconnect must not emit ChildExited");
+    }
+
+    /// Regression for the "cursor vanishes after an ssh session dies mid-TUI"
+    /// bug. Over ssh, a remote full-screen TUI entered the alt screen and hid
+    /// the cursor (`\e[?1049h\e[?25l`). The network then drops: the restore
+    /// sequences (`\e[?25h`, `\e[?1049l`) never arrive, ssh exits, and the
+    /// *host* shell draws its prompt (reported via OSC 133 → `Prompt`).
+    ///
+    /// Before the prompt-time scrub in the remote reader (see
+    /// `stale_mode_resets`), the grid stayed stranded on the alt screen with
+    /// a `Hidden` cursor shape, so *neither* cursor painted:
+    /// `element::build_grid` filters hidden grid cursors, and the inline
+    /// editor (which would ignore the stale-Hidden shape, see the test above)
+    /// never engaged because `input_active()` requires being off the alt
+    /// screen — a visible prompt with no cursor anywhere. The prompt report
+    /// must instead scrub the residue: off the alt screen, cursor shown,
+    /// editor live again.
+    #[gpui::test]
+    fn ssh_drop_mid_tui_recovers_at_the_next_prompt(cx: &mut TestAppContext) {
+        use alacritty_terminal::vte::ansi::CursorShape;
+
+        let (window, mut daemon) = harness(cx);
+
+        // Bytes that arrived over ssh before the drop: the remote TUI enters
+        // the alt screen and hides the cursor. The connection dies before any
+        // restore sequence is sent.
+        DaemonMsg::Output(b"\x1b[?1049h\x1b[?25l".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        // ssh exits; the host shell's integration reports a fresh prompt.
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(255), // ssh's exit code after a connection loss
+        }
+        .encode(&mut daemon)
+        .unwrap();
+
+        let mut state = (false, true, true);
+        for _ in 0..400 {
+            cx.run_until_parked();
+            state = window
+                .update(cx, |view, _, _| {
+                    let hidden = matches!(
+                        view.terminal.term.lock().renderable_content().cursor.shape,
+                        CursorShape::Hidden
+                    );
+                    (view.at_shell_prompt(), view.on_alt_screen(), hidden)
+                })
+                .unwrap();
+            if state == (true, false, false) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let (at_prompt, on_alt, hidden) = state;
+        assert!(at_prompt, "the host shell is back at its prompt");
+        assert!(
+            !on_alt,
+            "the prompt report must pull the grid off the stranded alt screen"
+        );
+        assert!(
+            !hidden,
+            "the prompt report must re-show the DECTCEM-hidden cursor"
+        );
+
+        // With the residue scrubbed, the inline editor engages and owns the
+        // caret again — the user sees a cursor at the prompt.
+        window
+            .update(cx, |view, _, _| {
+                assert!(
+                    view.input_active(),
+                    "off the alt screen and at the prompt, the editor is live"
+                );
+            })
+            .unwrap();
     }
 }
