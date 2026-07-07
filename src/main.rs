@@ -1,3 +1,7 @@
+// Hide the console window on Windows release builds; keep it in debug builds
+// so println!/eprintln! output remains visible while developing.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 mod core;
 mod daemon;
 mod terminal;
