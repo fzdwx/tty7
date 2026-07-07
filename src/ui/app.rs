@@ -1716,9 +1716,9 @@ impl Render for Tty7App {
             .on_action(cx.listener(|this, _: &ToggleMaximizePane, window, cx| {
                 this.toggle_maximize(window, cx)
             }))
-            .on_action(cx.listener(|_, _: &ToggleFullscreen, window, _cx| {
-                window.toggle_fullscreen()
-            }))
+            .on_action(
+                cx.listener(|_, _: &ToggleFullscreen, window, _cx| window.toggle_fullscreen()),
+            )
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings(window, cx)),
             )
