@@ -1184,6 +1184,7 @@ impl TerminalView {
                 }
             }
             "h" => self.cmd.backspace(),
+            "l" => self.terminal.write(vec![0x0c]),
             "c" => {
                 // Interrupt: drop the edited line and let the shell draw a
                 // fresh prompt (send ^C, as a real terminal would). zle's own
@@ -3809,6 +3810,37 @@ mod gpui_tests {
             })
             .unwrap();
         assert_eq!(next_input(&mut daemon), b"ping".to_vec());
+    }
+
+    #[gpui::test]
+    fn ctrl_l_at_prompt_reaches_the_shell_as_form_feed(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(0),
+        }
+        .encode(&mut daemon)
+        .unwrap();
+
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if window.update(cx, |view, _, _| view.input_active()).unwrap() {
+                break;
+            }
+        }
+        assert!(window.update(cx, |view, _, _| view.input_active()).unwrap());
+        daemon
+            .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+            .unwrap();
+
+        window
+            .update(cx, |view, _, cx| {
+                view.handle_editor_key(&gpui::Keystroke::parse("ctrl-l").unwrap(), cx);
+                assert_eq!(view.cmd.text(), "");
+            })
+            .unwrap();
+        assert_eq!(next_input(&mut daemon), vec![0x0c]);
     }
 
     #[gpui::test]
