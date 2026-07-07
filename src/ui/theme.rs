@@ -51,6 +51,8 @@ pub(crate) fn set_menus(cx: &mut App) {
             MenuItem::action("Increase Font Size", IncreaseFontSize),
             MenuItem::action("Decrease Font Size", DecreaseFontSize),
             MenuItem::action("Reset Font Size", ResetFontSize),
+            MenuItem::separator(),
+            MenuItem::action("Toggle Full Screen", ToggleFullscreen),
         ]),
     ]);
 }

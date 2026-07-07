@@ -122,7 +122,7 @@ pub struct Tty7App {
     /// `Some` while a tab label is being renamed inline; `None` otherwise.
     pub(crate) renaming: Option<Renaming>,
     /// When `Some`, the active tab renders only this one leaf full-window
-    /// (Cmd+Enter maximize). Cleared on any structural / navigation change.
+    /// (Cmd+Shift+Enter maximize). Cleared on any structural / navigation change.
     maximized: Option<Entity<TerminalView>>,
     /// Whether the tab chips currently show their ⌘1…⌘9 switch badges
     /// (shown while bare ⌘/Ctrl is held; see `hints::on_modifiers_changed`).
@@ -822,8 +822,8 @@ impl Tty7App {
         }
     }
 
-    /// Toggle maximize on the active tab's focused pane (Cmd+Enter). When a pane
-    /// is maximized the tab renders only that leaf full-window; toggling again
+    /// Toggle maximize on the active tab's focused pane (Cmd+Shift+Enter). When a
+    /// pane is maximized the tab renders only that leaf full-window; toggling again
     /// (or any structural change) restores the split layout. A no-op when the
     /// active tab has a single pane (nothing to maximize).
     fn toggle_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1066,6 +1066,7 @@ impl Tty7App {
             NextPane => self.cycle_pane(true, window, cx),
             PrevPane => self.cycle_pane(false, window, cx),
             ToggleMaximizePane => self.toggle_maximize(window, cx),
+            ToggleFullscreen => window.toggle_fullscreen(),
             ResetFontSize => self.reset_font_size(cx),
             FindInTerminal => {
                 // Open the search bar on the pane focus just returned to (the
@@ -1076,6 +1077,17 @@ impl Tty7App {
                     .and_then(|t| t.pane.focused_or_first(window, cx))
                 {
                     leaf.update(cx, |view, cx| view.open_search(window, cx));
+                }
+            }
+            ClearTerminal => {
+                // Same focus story as FindInTerminal: act on the pane the closing
+                // palette just handed focus back to.
+                if let Some(leaf) = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|t| t.pane.focused_or_first(window, cx))
+                {
+                    leaf.update(cx, |view, cx| view.clear_scrollback(cx));
                 }
             }
             ReopenClosedTab => self.reopen_closed_tab(window, cx),
@@ -1703,6 +1715,9 @@ impl Render for Tty7App {
             }))
             .on_action(cx.listener(|this, _: &ToggleMaximizePane, window, cx| {
                 this.toggle_maximize(window, cx)
+            }))
+            .on_action(cx.listener(|_, _: &ToggleFullscreen, window, _cx| {
+                window.toggle_fullscreen()
             }))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings(window, cx)),

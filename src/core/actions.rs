@@ -20,6 +20,7 @@ actions!(
         TogglePalette,
         ReopenClosedTab,
         ToggleMaximizePane,
+        ToggleFullscreen,
         OpenSettings,
         RestartDaemon,
         SendTab,

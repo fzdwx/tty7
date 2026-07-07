@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- ⌘K (Ctrl+K on Windows/Linux) clears the screen and scrollback — the same
+  "Clear" the right-click menu already offered, now on the keyboard shortcut
+  Terminal.app, iTerm2, and Ghostty users expect. Also available from the
+  command palette, and remappable as `ClearScrollback` in `keybindings`.
+- ⌘⏎ toggles window fullscreen (new `ToggleFullscreen` action, also in the
+  View menu and command palette), matching the Ghostty/iTerm2 default. It
+  previously toggled pane maximize — which silently did nothing in a
+  single-pane tab, so the chord felt dead.
+
+### Changed
+
+- Maximize / restore pane moved from ⌘⏎ to ⌘⇧⏎ (Ghostty's `toggle_split_zoom`
+  default), making room for fullscreen on the bare chord. An existing
+  `ToggleMaximizePane` override in `keybindings` still wins.
+
 ## [0.3.0] - 2026-07-07
 
 ### Added
