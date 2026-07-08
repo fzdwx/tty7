@@ -43,6 +43,18 @@ pub struct WinSize {
     pub cell_h: u16,
 }
 
+/// A shell program plus launch arguments, carried by `Spawn` when the user
+/// picked a specific shell from the new-tab dropdown. Same shape as
+/// `config::ShellConfig`, but defined here so the wire format doesn't depend
+/// on the config module's evolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellSpec {
+    /// Bare name resolved via `PATH` (`"pwsh"`) or an absolute path.
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
 /// Metadata for one live pane, returned by `List` for session restore / pickers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneInfo {
@@ -61,7 +73,13 @@ pub struct PaneInfo {
 pub enum ClientMsg {
     /// Create a new pane (spawn a shell) in `cwd`, sized to `size`. The daemon
     /// replies `Spawned`, then this connection becomes that pane's stream.
-    Spawn { cwd: Option<PathBuf>, size: WinSize },
+    /// `shell` overrides the daemon's default shell resolution (config →
+    /// platform default) when the user picked one from the new-tab dropdown.
+    Spawn {
+        cwd: Option<PathBuf>,
+        size: WinSize,
+        shell: Option<ShellSpec>,
+    },
     /// Bind this connection to an existing pane and (re)size it. The daemon
     /// replies with a `Snapshot` then live `Output`.
     Attach { pane_id: u64, size: WinSize },
@@ -126,6 +144,12 @@ mod kind {
     pub const KILL: u8 = 6;
     pub const LIST: u8 = 7;
     pub const SHUTDOWN: u8 = 8;
+    /// `Spawn` with an explicit shell override. A separate kind (rather than a
+    /// new field under `SPAWN`) so a default spawn stays byte-identical on the
+    /// wire: the GUI and the long-lived daemon can be different versions, and
+    /// an old daemon must keep serving new-GUI default spawns. Only picking a
+    /// non-default shell sends this, and only a too-old daemon rejects it.
+    pub const SPAWN_SHELL: u8 = 9;
 
     // Daemon -> client
     pub const SPAWNED: u8 = 1;
@@ -216,7 +240,19 @@ impl ClientMsg {
     /// Encode and write this message as one frame.
     pub fn encode<W: Write>(&self, w: &mut W) -> io::Result<()> {
         match self {
-            ClientMsg::Spawn { cwd, size } => write_frame(w, kind::SPAWN, &to_json(&(cwd, size))?),
+            // Default spawn keeps the legacy frame (kind + tuple payload)
+            // byte-for-byte so an older daemon still serves it; an explicit
+            // shell rides the newer SPAWN_SHELL frame. See `kind::SPAWN_SHELL`.
+            ClientMsg::Spawn {
+                cwd,
+                size,
+                shell: None,
+            } => write_frame(w, kind::SPAWN, &to_json(&(cwd, size))?),
+            ClientMsg::Spawn {
+                cwd,
+                size,
+                shell: shell @ Some(_),
+            } => write_frame(w, kind::SPAWN_SHELL, &to_json(&(cwd, size, shell))?),
             ClientMsg::Attach { pane_id, size } => {
                 write_frame(w, kind::ATTACH, &to_json(&(pane_id, size))?)
             }
@@ -234,7 +270,15 @@ impl ClientMsg {
         Ok(match k {
             kind::SPAWN => {
                 let (cwd, size) = from_json(&payload)?;
-                ClientMsg::Spawn { cwd, size }
+                ClientMsg::Spawn {
+                    cwd,
+                    size,
+                    shell: None,
+                }
+            }
+            kind::SPAWN_SHELL => {
+                let (cwd, size, shell) = from_json(&payload)?;
+                ClientMsg::Spawn { cwd, size, shell }
             }
             kind::ATTACH => {
                 let (pane_id, size) = from_json(&payload)?;
@@ -359,6 +403,7 @@ mod tests {
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/work")),
                 size: SIZE,
+                shell: None,
             },
             ClientMsg::Resize(SIZE),
             ClientMsg::Input(vec![b'l', b's', b'\r']),
@@ -413,10 +458,20 @@ mod tests {
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/tmp/x")),
                 size: SIZE,
+                shell: None,
             },
             ClientMsg::Spawn {
                 cwd: None,
                 size: SIZE,
+                shell: None,
+            },
+            ClientMsg::Spawn {
+                cwd: Some(PathBuf::from("/tmp/x")),
+                size: SIZE,
+                shell: Some(ShellSpec {
+                    program: "wsl.exe".into(),
+                    args: vec!["--distribution".into(), "Ubuntu".into()],
+                }),
             },
             ClientMsg::Attach {
                 pane_id: 42,
@@ -471,6 +526,42 @@ mod tests {
         for m in &msgs {
             assert_eq!(*m, DaemonMsg::read(&mut cursor).unwrap());
         }
+    }
+
+    /// Wire compatibility across GUI/daemon version skew, both directions:
+    /// a default spawn (`shell: None`) must emit the *legacy* frame — kind
+    /// `SPAWN` with a `(cwd, size)` tuple an old daemon can decode — and a
+    /// hand-built legacy frame must decode with `shell: None`. Locks the
+    /// compat contract documented on `kind::SPAWN_SHELL`.
+    #[test]
+    fn default_spawn_stays_wire_compatible_with_old_daemons() {
+        // New client -> old daemon: encode and pick the frame apart.
+        let msg = ClientMsg::Spawn {
+            cwd: Some(PathBuf::from("/work")),
+            size: SIZE,
+            shell: None,
+        };
+        let mut buf = Vec::new();
+        msg.encode(&mut buf).unwrap();
+        let (k, payload) = read_frame(&mut std::io::Cursor::new(&buf)).unwrap();
+        assert_eq!(k, kind::SPAWN, "default spawn must use the legacy kind");
+        // An old daemon deserializes exactly a (cwd, size) tuple.
+        let (cwd, size): (Option<PathBuf>, WinSize) = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(cwd, Some(PathBuf::from("/work")));
+        assert_eq!(size, SIZE);
+
+        // Old client -> new daemon: a hand-built legacy frame decodes to
+        // `shell: None`.
+        let legacy = serde_json::to_vec(&(Some(PathBuf::from("/old")), SIZE)).unwrap();
+        let decoded = ClientMsg::from_frame(kind::SPAWN, legacy).unwrap();
+        assert_eq!(
+            decoded,
+            ClientMsg::Spawn {
+                cwd: Some(PathBuf::from("/old")),
+                size: SIZE,
+                shell: None,
+            }
+        );
     }
 
     /// An empty-payload binary frame (e.g. an `Input([])`) still round-trips and

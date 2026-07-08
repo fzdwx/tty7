@@ -41,6 +41,70 @@ impl KittyFlags {
     }
 }
 
+/// Reshape a keystroke according to the macOS Option-key policy, before any
+/// encoding runs. macOS gives Option two jobs that a terminal can't serve at
+/// once: the OS composes a special character (Option+B types `∫`, delivered in
+/// `key_char`), while Meta bindings need an ESC-prefixed chord (Option+B →
+/// `ESC b`, readline's backward-word). `Config::macos_option_as_alt` picks:
+///
+/// * **On** — the chord is Meta: `key_char` is replaced with the plain key
+///   (uppercased under Shift, matching xterm's `metaSendsEscape` output), so
+///   the legacy encoder's Alt branch emits `ESC` + the base character instead
+///   of `ESC` + the composed one.
+/// * **Off** (default) — the chord is text input: the alt bit is dropped so the
+///   composed character is sent bare. (Without this, the legacy encoder bolts
+///   an ESC prefix onto the composed char — `ESC ∫` — a sequence that is wrong
+///   under either reading; and the prompt editor swallows the chord entirely.)
+///
+/// Only Option chords that produce a single text key are reshaped: named keys
+/// (arrows, Enter, …) and Ctrl/Cmd combinations keep their existing encodings
+/// on both settings. Returns `None` when the keystroke needs no reshaping, so
+/// callers only clone on the affected chords. Callers gate on macOS — the
+/// composed-character split doesn't exist elsewhere — but the function itself
+/// is platform-neutral so it can be tested everywhere.
+pub(super) fn reshape_option_keystroke(
+    ks: &gpui::Keystroke,
+    option_as_alt: bool,
+) -> Option<gpui::Keystroke> {
+    let m = &ks.modifiers;
+    if !m.alt || m.platform || m.control {
+        return None;
+    }
+    if option_as_alt {
+        // Meta semantics: the byte after ESC must be the key itself. Only
+        // single-character keys compose; named keys already encode off `key`.
+        let mut chars = ks.key.chars();
+        let base = chars.next()?;
+        if chars.next().is_some() {
+            return None;
+        }
+        // gpui reports shifted letters as a lowercase key + the shift bit;
+        // Meta follows the shifted character (Option+Shift+B → `ESC B`).
+        let ch = if m.shift {
+            base.to_uppercase().to_string()
+        } else {
+            base.to_string()
+        };
+        if ks.key_char.as_deref() == Some(ch.as_str()) {
+            return None; // already the base character — nothing to reshape
+        }
+        let mut out = ks.clone();
+        out.key_char = Some(ch);
+        Some(out)
+    } else {
+        // macOS convention: the chord is ordinary text input. A chord that
+        // composed no printable text (named keys, Enter's "\n") stays a real
+        // Alt chord — dropping alt there would break Alt+arrow and friends.
+        let ch = ks.key_char.as_deref()?;
+        if ch.is_empty() || ch.chars().any(|c| c < '\u{20}' || c == '\u{7f}') {
+            return None;
+        }
+        let mut out = ks.clone();
+        out.modifiers.alt = false;
+        Some(out)
+    }
+}
+
 /// Translate a GPUI keystroke into the bytes a PTY expects.
 ///
 /// When the app has enabled the Kitty keyboard protocol (`kitty.active()`) we try
@@ -478,7 +542,7 @@ impl InputHandler for TerminalInputHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{KittyFlags, keystroke_to_bytes, tab_bytes};
+    use super::{KittyFlags, keystroke_to_bytes, reshape_option_keystroke, tab_bytes};
     use gpui::{Keystroke, Modifiers};
 
     /// The legacy call shape used by the pre-existing tests: encode with the Kitty
@@ -886,6 +950,117 @@ mod tests {
         assert_eq!(
             keystroke_to_bytes(&ks(ctrl, "i", None), none),
             Some(vec![0x09])
+        );
+    }
+
+    /// Encode through the Option-key policy the way `on_key_down` does: reshape
+    /// first (macOS semantics), then hand the result to the shared encoder.
+    fn reshaped_bytes(ks: &Keystroke, option_as_alt: bool, kitty: KittyFlags) -> Option<Vec<u8>> {
+        let reshaped = reshape_option_keystroke(ks, option_as_alt);
+        keystroke_to_bytes(reshaped.as_ref().unwrap_or(ks), kitty)
+    }
+
+    /// An Option+B chord as gpui reports it on macOS: base key "b", the alt
+    /// bit, and the OS-composed character in `key_char`.
+    fn option_b() -> Keystroke {
+        let alt = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        ks(alt, "b", Some("∫"))
+    }
+
+    #[test]
+    fn option_as_alt_on_sends_esc_plus_base_key() {
+        // Meta semantics: ESC + the plain key, not ESC + the composed char.
+        assert_eq!(
+            reshaped_bytes(&option_b(), true, KittyFlags::default()),
+            Some(b"\x1bb".to_vec())
+        );
+        // Shifted letters follow the shifted character: Option+Shift+B → ESC B.
+        let alt_shift = Modifiers {
+            alt: true,
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            reshaped_bytes(&ks(alt_shift, "b", Some("ı")), true, KittyFlags::default()),
+            Some(b"\x1bB".to_vec())
+        );
+        // Non-letter keys too: Option+2 composes "™" but Meta sends ESC 2.
+        let alt = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            reshaped_bytes(&ks(alt, "2", Some("™")), true, KittyFlags::default()),
+            Some(b"\x1b2".to_vec())
+        );
+    }
+
+    #[test]
+    fn option_as_alt_off_sends_composed_text_bare() {
+        // macOS convention: the chord is text input — the composed character
+        // goes out with NO ESC prefix. (The unreshaped legacy path used to emit
+        // `ESC ∫`, wrong under either reading of the Option key.)
+        assert_eq!(
+            reshaped_bytes(&option_b(), false, KittyFlags::default()),
+            Some("∫".as_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn option_reshape_leaves_named_keys_and_ctrl_chords_alone() {
+        let alt = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        // Named keys compose nothing: Alt+Up keeps its ESC-prefixed form on
+        // both settings.
+        for on in [true, false] {
+            assert!(reshape_option_keystroke(&ks(alt, "up", None), on).is_none());
+            assert_eq!(
+                reshaped_bytes(&ks(alt, "up", None), on, KittyFlags::default()),
+                Some(b"\x1b\x1b[A".to_vec())
+            );
+        }
+        // Enter's key_char is a control char ("\n"), not composed text: the
+        // chord stays a real Alt chord with the setting off.
+        assert!(reshape_option_keystroke(&ks(alt, "enter", Some("\n")), false).is_none());
+        // Ctrl+Alt chords keep the C0 + Meta-ESC encoding on both settings.
+        let ctrl_alt = Modifiers {
+            control: true,
+            alt: true,
+            ..Default::default()
+        };
+        for on in [true, false] {
+            assert!(reshape_option_keystroke(&ks(ctrl_alt, "c", None), on).is_none());
+            assert_eq!(
+                reshaped_bytes(&ks(ctrl_alt, "c", None), on, KittyFlags::default()),
+                Some(vec![0x1b, 0x03])
+            );
+        }
+        // No alt held → nothing to reshape, either setting.
+        assert!(
+            reshape_option_keystroke(&ks(Modifiers::default(), "a", Some("a")), true).is_none()
+        );
+        // A key_char already equal to the base key needs no clone.
+        assert!(reshape_option_keystroke(&ks(alt, "b", Some("b")), true).is_none());
+    }
+
+    #[test]
+    fn option_reshape_composes_with_the_kitty_encoder() {
+        // Option-as-Meta keeps the alt bit, so a Kitty-aware app still sees the
+        // spec's alt-modified base key.
+        assert_eq!(
+            reshaped_bytes(&option_b(), true, kitty()),
+            Some(b"\x1b[98;3u".to_vec())
+        );
+        // Option-as-composed drops the alt bit: at the disambiguate level the
+        // chord is plain text, sent raw like any other typed character.
+        assert_eq!(
+            reshaped_bytes(&option_b(), false, kitty()),
+            Some("∫".as_bytes().to_vec())
         );
     }
 

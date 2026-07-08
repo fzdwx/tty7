@@ -46,9 +46,9 @@ pub struct Config {
     pub keybindings: HashMap<String, String>,
     /// Optional shell override for the terminals tty7 spawns. When unset (the
     /// default), the platform's default shell is used: the user's login shell on
-    /// Unix (via `$SHELL`), and PowerShell on Windows. Set this to run a specific
-    /// shell instead — e.g. `pwsh` / `cmd` / WSL `bash` on Windows, or `fish` /
-    /// `bash` on Unix.
+    /// Unix (via `$SHELL`), and PowerShell on Windows (PowerShell 7 when
+    /// installed, else Windows PowerShell). Set this to run a specific shell
+    /// instead — e.g. `cmd` / WSL `bash` on Windows, or `fish` / `bash` on Unix.
     pub shell: Option<ShellConfig>,
 
     // ── Behavior ────────────────────────────────────────────────────────────
@@ -80,6 +80,13 @@ pub struct Config {
     pub cursor_style: CursorStyle,
 
     // ── Input / Mouse ───────────────────────────────────────────────────────
+    /// macOS only: treat the Option (⌥) key as Alt/Meta. On, an Option chord
+    /// sends the ESC-prefixed sequence Meta bindings expect (Option+B → `ESC b`,
+    /// readline's backward-word), like Ghostty's `macos-option-as-alt` /
+    /// iTerm2's "Option as Meta". Off (the default), Option keeps its macOS
+    /// role of composing special characters (Option+B → `∫`). Ignored on other
+    /// platforms, where Alt always carries the Meta meaning.
+    pub macos_option_as_alt: bool,
     /// Hide the OS mouse pointer while typing; it reappears on the next mouse
     /// move. Off by default.
     pub mouse_hide_while_typing: bool,
@@ -228,7 +235,8 @@ impl Default for Config {
             colors: Colors::default(),
             keybindings: HashMap::new(),
             // `None` → the platform default shell (login shell on Unix,
-            // PowerShell on Windows), chosen by the daemon at spawn time.
+            // PowerShell 7 / Windows PowerShell on Windows), chosen by the
+            // daemon at spawn time.
             shell: None,
             // Behavior defaults mirror the values previously hardcoded across the
             // app, so exposing them as config changes nothing until the user opts
@@ -243,10 +251,12 @@ impl Default for Config {
             // outdated is the status quo we're fixing. One cheap GET at startup.
             check_for_updates: true,
             cursor_style: CursorStyle::Block,
-            // Input/mouse defaults preserve today's behavior: GPUI already hides
-            // the pointer while typing (its `CursorHideMode` default), so this
-            // starts `true`; no focus-follows-mouse, raw 1× scroll, no copy trim,
-            // a normal centered window.
+            // Input/mouse defaults preserve today's behavior: Option composes
+            // characters as macOS ships it (opt into Option-as-Meta); GPUI
+            // already hides the pointer while typing (its `CursorHideMode`
+            // default), so that starts `true`; no focus-follows-mouse, raw 1×
+            // scroll, no copy trim, a normal centered window.
+            macos_option_as_alt: false,
             mouse_hide_while_typing: true,
             focus_follows_mouse: false,
             mouse_scroll_multiplier: 1.0,
@@ -449,7 +459,8 @@ pub fn config_dir_path() -> Option<PathBuf> {
 /// The user's configured shell override, if any, as `(program, args)`. Loaded
 /// straight from `config.json` so the **daemon** process (which has no GPUI
 /// `Config` global) can honor it when spawning a PTY. `None` → the daemon picks
-/// the platform default (login shell on Unix, PowerShell on Windows).
+/// the platform default (login shell on Unix, PowerShell 7 / Windows PowerShell
+/// on Windows).
 pub fn shell_command() -> Option<(String, Vec<String>)> {
     Config::load().shell.map(|s| (s.program, s.args))
 }

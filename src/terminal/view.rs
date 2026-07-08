@@ -29,6 +29,7 @@ use crate::core::actions::{
     CloseActiveTab, NewTab, SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
 use crate::core::config::{Config, NotifyMode};
+use crate::daemon::protocol::ShellSpec;
 
 // Terminal-scoped actions dispatched by the right-click context menu. They route
 // to this view via `.on_action` handlers on the terminal surface; tab/split
@@ -65,6 +66,11 @@ pub struct TerminalView {
     /// so a restart can re-`attach` to the still-running pane (process + scrollback
     /// intact) instead of spawning a fresh shell.
     pub pane_id: u64,
+    /// The shell this pane was spawned with when the user picked one from the
+    /// new-tab dropdown; `None` for the default shell and for re-attached
+    /// panes. In-memory only (not persisted) — held so splits of this pane
+    /// inherit the same shell.
+    shell_spec: Option<ShellSpec>,
     pub focus_handle: FocusHandle,
     pub font: Font,
     /// Optional distinct base face for bold cells (from `font_family_bold`), with
@@ -366,26 +372,58 @@ fn clipboard_paste_text(item: &ClipboardItem) -> Option<String> {
     item.text()
 }
 
+/// The font fallback chain: the user's configured list with the bundled "Hack"
+/// pinned to the end. Hack ships inside the binary (`register_bundled_fonts`)
+/// and covers the symbols prompt themes lean on — `❯`, `➜`, box drawing, the
+/// sharp powerline wedges — with ink that fits a monospace advance. Without
+/// this anchor, a custom `font_family` that lacks one of those codepoints
+/// falls through the whole configured list into the OS cascade, which happily
+/// serves a proportional glyph wider than the cell that `paint_glyphs`'
+/// per-cell clip then truncates (issue #17's severed `➜`).
+fn fallback_chain(family: &str, configured: &[String]) -> Vec<String> {
+    let mut chain = configured.to_vec();
+    if family != "Hack" && !chain.iter().any(|f| f == "Hack") {
+        chain.push("Hack".to_string());
+    }
+    chain
+}
+
 impl TerminalView {
     pub fn new(
         working_directory: Option<std::path::PathBuf>,
         restore_pane: Option<u64>,
+        shell: Option<ShellSpec>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<Self> {
         // Provisional size; corrected on the first prepaint once we can measure.
         // The PTY lives in the daemon now. On session restore (`restore_pane`),
         // re-`attach` to the still-running pane so its process + scrollback come
-        // back intact; otherwise `spawn` a fresh pane. The caller only passes a
-        // `restore_pane` it has already confirmed alive, so we trust it here.
-        let (terminal, pane_id) = match restore_pane {
+        // back intact; otherwise `spawn` a fresh pane (with the caller's shell
+        // pick, if any). The caller only passes a `restore_pane` it has already
+        // confirmed alive, so we trust it here.
+        let (terminal, pane_id, shell_spec) = match restore_pane {
             Some(id) => (
                 RemoteTerminal::attach(TermSize::new(80, 24), 8, 17, id)?,
                 id,
+                // An attached pane keeps whatever shell it already runs; the
+                // pick that spawned it (if any) isn't persisted.
+                None,
             ),
-            None => RemoteTerminal::spawn(TermSize::new(80, 24), 8, 17, working_directory)?,
+            None => {
+                let (terminal, id) = RemoteTerminal::spawn(
+                    TermSize::new(80, 24),
+                    8,
+                    17,
+                    working_directory,
+                    shell.clone(),
+                )?;
+                (terminal, id, shell)
+            }
         };
-        Ok(Self::with_terminal(terminal, pane_id, window, cx))
+        let mut view = Self::with_terminal(terminal, pane_id, window, cx);
+        view.shell_spec = shell_spec;
+        Ok(view)
     }
 
     /// Build the view around an already-connected terminal. Split from [`new`]
@@ -403,7 +441,7 @@ impl TerminalView {
         // Font Mono + Apple Color Emoji at 13px.
         let config = cx.global::<Config>();
         let font_family = config.font_family.clone();
-        let fallbacks = config.font_fallbacks.clone();
+        let fallbacks = fallback_chain(&font_family, &config.font_fallbacks);
         let font_size = px(config.font_size);
         let line_height_mul = config.line_height;
         let mut font = gpui::font(font_family);
@@ -554,6 +592,7 @@ impl TerminalView {
         Self {
             terminal,
             pane_id,
+            shell_spec: None,
             focus_handle,
             font,
             font_bold,
@@ -615,6 +654,12 @@ impl TerminalView {
     /// new tabs / splits can open in the same place. `None` if it can't be read.
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
         self.terminal.foreground_cwd()
+    }
+
+    /// The shell this pane was explicitly spawned with (new-tab dropdown pick),
+    /// so splits can inherit it. `None` → the default shell.
+    pub fn shell_spec(&self) -> Option<ShellSpec> {
+        self.shell_spec.clone()
     }
 
     fn handle_event(&mut self, ev: AlacEvent, cx: &mut Context<Self>) {
@@ -717,7 +762,19 @@ impl TerminalView {
         if self.terminal.exited {
             return;
         }
-        let ks = &ev.keystroke;
+        // macOS Option-key policy (see `input::reshape_option_keystroke`):
+        // reshape the chord once, up front, so every consumer below — the ⌘
+        // dispatcher, the prompt editor, the raw PTY encoder — sees the same
+        // story. Other platforms have no composed-character split to resolve.
+        let reshaped = if cfg!(target_os = "macos") {
+            super::input::reshape_option_keystroke(
+                &ev.keystroke,
+                cx.global::<Config>().macos_option_as_alt,
+            )
+        } else {
+            None
+        };
+        let ks = reshaped.as_ref().unwrap_or(&ev.keystroke);
         let m = &ks.modifiers;
 
         // While the search field is focused it owns the keyboard — typing, caret
@@ -1052,6 +1109,36 @@ impl TerminalView {
             self.apply_readline_ctrl(key);
             cx.notify();
             return;
+        }
+
+        // Readline-style Meta word chords on the edited line: M-b / M-f motions
+        // and M-d delete-word, mirroring the Alt+←/→/Delete handling below. On
+        // macOS these are reachable only with `macos_option_as_alt` on — with it
+        // off the chord composes a character upstream and arrives here altless,
+        // through the printable-text arm. Other Alt+letter chords stay swallowed
+        // no-ops as before (the local editor can't mirror every zle widget).
+        if m.alt && !m.platform && !m.control {
+            match key {
+                "b" => {
+                    self.editor_move_h(false, m.shift, true);
+                    cx.notify();
+                    return;
+                }
+                "f" => {
+                    self.editor_move_h(true, m.shift, true);
+                    cx.notify();
+                    return;
+                }
+                "d" => {
+                    if !self.cmd.delete_selection() {
+                        self.cmd.delete_word_right();
+                    }
+                    self.history_nav = None;
+                    cx.notify();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         match key {
@@ -3361,14 +3448,46 @@ fn smooth_scroll_step(offset: usize, frac: f32, delta: f32, max: usize) -> (i32,
 #[cfg(test)]
 mod tests {
     use super::{
-        WheelRoute, clipboard_paste_text, display_width, encode_mouse, fig_icon_emoji,
-        fig_icon_glyph, focus_report_bytes, menu_layout, paste_bytes, shell_escape_path,
-        smooth_scroll_step, trim_trailing_spaces, wheel_route, wrapped_click_index,
+        WheelRoute, clipboard_paste_text, display_width, encode_mouse, fallback_chain,
+        fig_icon_emoji, fig_icon_glyph, focus_report_bytes, menu_layout, paste_bytes,
+        shell_escape_path, smooth_scroll_step, trim_trailing_spaces, wheel_route,
+        wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
     use gpui_component::IconName;
     use std::path::PathBuf;
+
+    /// The bundled Hack always anchors the fallback chain so prompt symbols
+    /// (`➜`, `❯`, powerline wedges) never fall through to the OS cascade —
+    /// unless the user already covers it as primary or in their own list.
+    #[test]
+    fn fallback_chain_pins_bundled_hack_last() {
+        let configured = vec!["Menlo".to_string(), "Apple Color Emoji".to_string()];
+
+        // A custom primary that may lack the prompt symbols → Hack appended.
+        assert_eq!(
+            fallback_chain("JetBrains Mono", &configured),
+            ["Menlo", "Apple Color Emoji", "Hack"]
+        );
+
+        // Hack as the primary face already covers everything it could add.
+        assert_eq!(
+            fallback_chain("Hack", &configured),
+            ["Menlo", "Apple Color Emoji"]
+        );
+
+        // A user who lists Hack explicitly keeps their chosen position.
+        let with_hack = vec!["Hack".to_string(), "Menlo".to_string()];
+        assert_eq!(fallback_chain("SF Mono", &with_hack), ["Hack", "Menlo"]);
+
+        // "Hack Nerd Font" is a different family — the bundled face still lands.
+        assert_eq!(
+            fallback_chain("Hack Nerd Font", &[]),
+            ["Hack"],
+            "a Hack-prefixed family name must not suppress the bundled anchor"
+        );
+    }
 
     /// The wheel reaches the app only through the modes it negotiated: mouse
     /// reporting first, alternate scroll second, local scrollback otherwise.
@@ -3910,6 +4029,45 @@ mod gpui_tests {
                 _ => continue,
             }
         }
+    }
+
+    /// Readline's Meta word chords act on the local prompt editor: M-b / M-f
+    /// move by word, M-d deletes the word right of the caret. (On macOS these
+    /// chords reach the editor only with `macos_option_as_alt` on — the
+    /// `on_key_down` reshape otherwise strips the alt bit; here we drive the
+    /// editor dispatcher directly with the post-reshape keystroke.)
+    #[gpui::test]
+    fn meta_word_chords_edit_the_prompt_line(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                let meta = |key: &str| gpui::Keystroke {
+                    modifiers: gpui::Modifiers {
+                        alt: true,
+                        ..Default::default()
+                    },
+                    key: key.to_string(),
+                    key_char: None,
+                };
+                view.cmd.set("echo hello");
+                // M-b from the end lands at the start of "hello".
+                view.handle_editor_key(&meta("b"), cx);
+                assert_eq!(view.cmd.cursor(), 5);
+                // M-d deletes the word right of the caret.
+                view.handle_editor_key(&meta("d"), cx);
+                assert_eq!(view.cmd.text(), "echo ");
+                // M-b / M-f hop the remaining word: back to its start, then
+                // forward to its end.
+                view.handle_editor_key(&meta("b"), cx);
+                assert_eq!(view.cmd.cursor(), 0);
+                view.handle_editor_key(&meta("f"), cx);
+                assert_eq!(view.cmd.cursor(), 4);
+                // Other Meta letters stay swallowed no-ops (line untouched).
+                view.handle_editor_key(&meta("z"), cx);
+                assert_eq!(view.cmd.text(), "echo ");
+                assert_eq!(view.cmd.cursor(), 4);
+            })
+            .unwrap();
     }
 
     /// A `PtyWrite` raised by the VT layer (query replies, bracketed-paste

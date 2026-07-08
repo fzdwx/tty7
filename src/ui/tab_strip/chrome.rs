@@ -1,4 +1,4 @@
-use gpui::{Context, MouseButton, MouseDownEvent, Window, div, prelude::*, px};
+use gpui::{Context, MouseButton, MouseDownEvent, div, prelude::*, px};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _};
 
 use crate::ui::app::Tty7App;
@@ -30,37 +30,6 @@ impl Tty7App {
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
                     this.toggle_file_tree_visibility(cx);
-                }),
-            )
-    }
-
-    pub(super) fn title_bar_tile<F>(
-        &self,
-        id: &'static str,
-        icon: IconName,
-        cx: &mut Context<Self>,
-        on_click: F,
-    ) -> impl IntoElement + use<F>
-    where
-        F: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    {
-        div()
-            .id(id)
-            .occlude()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(30.))
-            .rounded_lg()
-            .text_color(cx.theme().muted_foreground)
-            .hover(|s| s.bg(cx.theme().muted))
-            .child(Icon::new(icon).size(px(15.)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    on_click(this, window, cx);
                 }),
             )
     }

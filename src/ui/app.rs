@@ -19,6 +19,8 @@ use crate::core::session::{
     Session, SessionAxis, SessionFileTreeState, SessionPane, SessionTab, SessionTabKind,
     SessionWorkspace,
 };
+use crate::core::shells::DetectedShell;
+use crate::daemon::protocol::ShellSpec;
 use crate::terminal::view::{ChildExited, CwdChanged, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Pane};
@@ -167,6 +169,10 @@ pub struct Tty7App {
     /// Keeping something focused keeps keystrokes flowing through the window's
     /// dispatch path, so ⌘T & friends still reach the root action handlers.
     pub(crate) home_focus: gpui::FocusHandle,
+    /// Shells found on this machine (`core::shells::detect_shells`), listed in
+    /// the "+" dropdown. Probed once at startup off the UI thread — empty until
+    /// that lands, when the dropdown offers just the default entry.
+    pub(crate) detected_shells: Vec<DetectedShell>,
 }
 
 impl Tty7App {
@@ -202,7 +208,7 @@ impl Tty7App {
                 // predecessor to inherit from, so start in the app's current
                 // directory (None → default behavior).
                 None => {
-                    let first = new_terminal(font_size, None, None, window, cx);
+                    let first = new_terminal(font_size, None, None, None, window, cx);
                     (
                         vec![Tab::new(Pane::leaf(first))],
                         0,
@@ -239,7 +245,24 @@ impl Tty7App {
             mod_hint_badges: false,
             mod_hint_gen: 0,
             home_focus: cx.focus_handle(),
+            detected_shells: Vec::new(),
         };
+        // Discover this machine's shells for the "+" dropdown off the UI thread
+        // (the WSL probe on Windows spawns a process, and /etc/shells hits the
+        // filesystem). Until it lands the dropdown offers just the default entry.
+        cx.spawn(async move |this, cx| {
+            let shells = cx
+                .background_spawn(async { crate::core::shells::detect_shells() })
+                .await;
+            // `notify` so the strip re-renders and the dropdown closure
+            // captures the freshly landed list (nothing else is guaranteed to
+            // redraw an idle window).
+            let _ = this.update(cx, |app, cx| {
+                app.detected_shells = shells;
+                cx.notify();
+            });
+        })
+        .detach();
         // Persist the session one last time as the app quits. This captures the
         // latest state — including a plain `cd` that changed a pane's cwd but
         // triggered no structural change — so the next launch restores where the
@@ -676,6 +699,12 @@ impl Tty7App {
 
     // ── Input / Mouse setters ───────────────────────────────────────────────
 
+    /// Takes effect on the next keystroke — the terminal reads the flag per
+    /// key event, so nothing needs pushing to open panes.
+    pub(crate) fn set_macos_option_as_alt(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.macos_option_as_alt = on);
+    }
+
     pub(crate) fn set_mouse_hide_while_typing(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.mouse_hide_while_typing = on);
         // Push the new policy to GPUI right away (same call the hot-reload uses).
@@ -745,6 +774,17 @@ impl Tty7App {
     }
 
     pub(crate) fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_tab_with_shell(None, window, cx);
+    }
+
+    /// Open a new tab running `shell` — a pick from the "+" dropdown — or the
+    /// default shell when `None` (the plain "+" click / Cmd+T path).
+    pub(crate) fn new_tab_with_shell(
+        &mut self,
+        shell: Option<ShellSpec>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Inherit the cwd of the active tab's focused terminal so the new tab
         // opens in the same directory the user is currently working in.
         let cwd = self
@@ -763,7 +803,7 @@ impl Tty7App {
                     .and_then(|leaf| leaf.read(cx).cwd())
             })
             .or_else(|| Some(self.file_tree_root.clone()));
-        let tab = new_terminal(self.font_size, cwd, None, window, cx);
+        let tab = new_terminal(self.font_size, cwd, None, shell, window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
         self.tabs.insert(insert_at, Tab::new(Pane::leaf(tab)));
@@ -785,9 +825,12 @@ impl Tty7App {
         else {
             return;
         };
-        // The new pane inherits the cwd of the pane being split.
+        // The new pane inherits the cwd — and the shell, when the pane being
+        // split was opened with an explicit pick (a WSL/fish tab splits into
+        // more WSL/fish, not back to the default).
         let cwd = target.read(cx).cwd();
-        let new = new_terminal(self.font_size, cwd, None, window, cx);
+        let shell = target.read(cx).shell_spec();
+        let new = new_terminal(self.font_size, cwd, None, shell, window, cx);
         if let Some(tab) = self.tabs.get_mut(self.active)
             && tab.pane.split_leaf(&target, axis, new.clone())
         {
@@ -2091,7 +2134,9 @@ pub(crate) fn session_to_pane(
             // Only restore the pane id when the daemon confirms it's still live;
             // a stale id (daemon restarted, pane killed) falls back to a spawn.
             let restore = (*pane_id).filter(|id| alive.contains(id));
-            let view = new_terminal(font_size, cwd.clone(), restore, window, cx);
+            // A shell pick isn't persisted in the session, so a stale pane that
+            // must respawn comes back on the default shell.
+            let view = new_terminal(font_size, cwd.clone(), restore, None, window, cx);
             Pane::leaf(view)
         }
         SessionPane::Split { axis, ratio, a, b } => {
@@ -2131,11 +2176,12 @@ pub(crate) fn new_terminal(
     font_size: f32,
     working_directory: Option<std::path::PathBuf>,
     restore_pane: Option<u64>,
+    shell: Option<ShellSpec>,
     window: &mut Window,
     cx: &mut Context<Tty7App>,
 ) -> Entity<TerminalView> {
     let view = cx.new(|cx| {
-        let mut view = TerminalView::new(working_directory, restore_pane, window, cx)
+        let mut view = TerminalView::new(working_directory, restore_pane, shell, window, cx)
             .expect("failed to start terminal");
         // Inherit the current global font size so new panes match existing ones.
         view.font_size = px(font_size);

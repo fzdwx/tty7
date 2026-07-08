@@ -47,7 +47,7 @@ impl Tty7App {
             },
         );
         let workspace = SessionWorkspace::from_tabs(id, 0, vec![seed_tab]);
-        let terminal = new_terminal(self.font_size, Some(cwd), None, window, cx);
+        let terminal = new_terminal(self.font_size, Some(cwd), None, None, window, cx);
         let index = workspaces.len();
         workspaces.push(workspace.clone());
 

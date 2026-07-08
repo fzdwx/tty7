@@ -35,30 +35,52 @@ use std::time::Duration;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::core::osc::OscTokenizer;
-use crate::daemon::protocol::{DaemonMsg, PaneInfo, WinSize};
+use crate::daemon::protocol::{DaemonMsg, PaneInfo, ShellSpec, WinSize};
 use crate::daemon::shell_integration;
-
-/// The Windows default shell. `powershell.exe` (Windows PowerShell 5.1) ships
-/// with every supported Windows, so it always resolves — users who prefer
-/// `pwsh` 7+ or `cmd` can set `shell` in config. This is also the name shell
-/// integration keys off (see [`default_shell_name`]).
-#[cfg(windows)]
-const WINDOWS_DEFAULT_SHELL: &str = "powershell.exe";
 
 /// The platform default shell command, used when the user hasn't set `shell` in
 /// `config.json`. On Windows `portable-pty`'s own default is `%COMSPEC%`
-/// (i.e. `cmd.exe`); we override it to PowerShell so tty7's default matches what
-/// the docs promise.
+/// (i.e. `cmd.exe`); we override it to PowerShell — PowerShell 7 (`pwsh`) when
+/// installed, probed once by `core::shells`, else the `powershell.exe` that
+/// ships with every supported Windows. Mirrors Warp / Windows Terminal's
+/// preference for the modern shell.
 #[cfg(windows)]
 fn default_prog() -> CommandBuilder {
-    CommandBuilder::new(WINDOWS_DEFAULT_SHELL)
+    CommandBuilder::new(crate::core::shells::windows_default_shell())
 }
 
-/// On Unix, defer to `portable-pty`, which launches the user's login shell from
-/// the passwd database (falling back to `/bin/sh`).
+/// On Unix, start from `portable-pty`'s login-shell builder, but switch to an
+/// explicit command when the GUI has already detected the shell that launched
+/// tty7 and forwarded it to the detached daemon. LaunchServices may otherwise
+/// give the daemon a stale config dir and stale `$SHELL`.
 #[cfg(not(windows))]
 fn default_prog() -> CommandBuilder {
-    CommandBuilder::new_default_prog()
+    default_prog_with_override(detected_shell_override())
+}
+
+#[cfg(not(windows))]
+fn default_prog_with_override(shell_override: Option<String>) -> CommandBuilder {
+    let cmd = CommandBuilder::new_default_prog();
+    let portable_shell = cmd.get_shell();
+    if let Some(shell) = shell_override.filter(|shell| shell != &portable_shell) {
+        return CommandBuilder::new(&shell);
+    }
+    cmd
+}
+
+#[cfg(not(windows))]
+fn detected_shell_override() -> Option<String> {
+    let path = std::env::var_os(crate::daemon::DETECTED_SHELL_ENV)?;
+    usable_shell_path(path)
+}
+
+#[cfg(not(windows))]
+fn usable_shell_path(path: std::ffi::OsString) -> Option<String> {
+    let path = PathBuf::from(path);
+    if path.as_os_str().is_empty() || !path.is_file() {
+        return None;
+    }
+    path.into_os_string().into_string().ok()
 }
 
 /// The program name used to detect which shell integration applies for the
@@ -66,15 +88,45 @@ fn default_prog() -> CommandBuilder {
 /// (`$SHELL` / passwd). On Windows we can't ask the builder: its `get_shell()`
 /// reports `%ComSpec%` (cmd.exe) regardless of what we actually spawn, so it
 /// would send integration detection chasing cmd.exe and never engage — return
-/// our real default (`powershell.exe`) instead.
+/// the same PowerShell `default_prog()` resolved instead.
 #[cfg(windows)]
 fn default_shell_name(_cmd: &CommandBuilder) -> String {
-    WINDOWS_DEFAULT_SHELL.to_string()
+    crate::core::shells::windows_default_shell().to_string()
 }
 
 #[cfg(not(windows))]
 fn default_shell_name(cmd: &CommandBuilder) -> String {
     cmd.get_shell()
+}
+
+/// Which shell a spawn launches, by precedence: the explicit per-spawn override
+/// (the new-tab dropdown) > the configured `shell` in `config.json` > `None`,
+/// meaning the platform default (`default_prog()`). Kept as a function so the
+/// contract is stated (and tested) in one place.
+fn choose_shell(
+    spawn_override: Option<ShellSpec>,
+    configured: Option<(String, Vec<String>)>,
+) -> Option<(String, Vec<String>)> {
+    spawn_override.map(|s| (s.program, s.args)).or(configured)
+}
+
+fn apply_shell_integration(
+    cmd: &mut CommandBuilder,
+    resolved_program: &str,
+    integration: &shell_integration::Injection,
+) {
+    // `CommandBuilder::new_default_prog()` preserves the Unix login-shell argv0
+    // shape, but portable-pty intentionally panics if argv is appended to that
+    // sentinel builder. Integrations that need argv (fish `-C`, bash `--rcfile`,
+    // PowerShell flags) must use an explicit command builder first. Env-only zsh
+    // integration keeps the default login-shell path.
+    if integration.force_non_login || (cmd.is_default_prog() && !integration.args.is_empty()) {
+        *cmd = CommandBuilder::new(resolved_program);
+    }
+    cmd.args(&integration.args);
+    for (k, v) in &integration.env {
+        cmd.env(k, v);
+    }
 }
 
 /// Default cap on the replay ring: 8 MiB. Enough to reconstruct a deep screen +
@@ -242,24 +294,27 @@ pub struct DaemonPane {
 
 impl DaemonPane {
     /// Spawn the user's shell on a fresh PTY in `cwd`, sized to `size`, and start
-    /// its reader thread. `id` is the registry id the server assigns. `on_dead`
-    /// fires (from the reader thread) when the child exits while *nobody is
-    /// attached* — the case where no connection's detach would ever reclaim the
-    /// pane; the server uses it to drop the dead pane from its registry instead
-    /// of leaking the zombie child + replay ring for the daemon's lifetime.
+    /// its reader thread. `id` is the registry id the server assigns. `shell` is
+    /// an explicit per-spawn override (the new-tab dropdown) that outranks the
+    /// configured default — see [`choose_shell`]. `on_dead` fires (from the
+    /// reader thread) when the child exits while *nobody is attached* — the case
+    /// where no connection's detach would ever reclaim the pane; the server uses
+    /// it to drop the dead pane from its registry instead of leaking the zombie
+    /// child + replay ring for the daemon's lifetime.
     pub fn spawn(
         id: u64,
         cwd: Option<PathBuf>,
         size: WinSize,
+        shell: Option<ShellSpec>,
         on_dead: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Arc<Self>> {
         let pty_size = pty_size(size);
 
         let pair = native_pty_system().openpty(pty_size)?;
 
-        // Build the shell command. A configured `shell` wins; otherwise fall back
-        // to the platform default (the login shell on Unix, PowerShell on Windows).
-        let configured = crate::core::config::shell_command();
+        // Build the shell command; `None` means the platform default (the login
+        // shell on Unix, PowerShell on Windows).
+        let configured = choose_shell(shell, crate::core::config::shell_command());
         let mut cmd = match &configured {
             Some((program, args)) => {
                 let mut c = CommandBuilder::new(program);
@@ -290,16 +345,7 @@ impl DaemonPane {
             .is_some_and(|(_, args)| !args.is_empty());
         let integration = shell_integration::setup(Some(&resolved_program), has_custom_args);
         if let Some(integration) = &integration {
-            // Bash only takes `--rcfile` as a non-login shell, so rebuild `cmd` as
-            // a plain invocation of the resolved program rather than however
-            // `default_prog()` would otherwise spawn it (a login shell on Unix).
-            if integration.force_non_login {
-                cmd = CommandBuilder::new(&resolved_program);
-            }
-            cmd.args(&integration.args);
-            for (k, v) in &integration.env {
-                cmd.env(k, v);
-            }
+            apply_shell_integration(&mut cmd, &resolved_program, integration);
         }
         let integration_dir = integration.as_ref().and_then(|i| i.dir.clone());
 
@@ -1132,6 +1178,97 @@ fn proc_name(pid: i32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spawn shell precedence: explicit override > configured > platform
+    /// default (`None`). Locks the contract stated on [`choose_shell`].
+    #[test]
+    fn choose_shell_prefers_override_then_config_then_default() {
+        let over = ShellSpec {
+            program: "fish".into(),
+            args: vec!["-l".into()],
+        };
+        let cfg = ("zsh".to_string(), vec!["-i".to_string()]);
+
+        // Override wins even when a shell is configured.
+        assert_eq!(
+            choose_shell(Some(over.clone()), Some(cfg.clone())),
+            Some(("fish".to_string(), vec!["-l".to_string()]))
+        );
+        // No override → the configured shell.
+        assert_eq!(choose_shell(None, Some(cfg.clone())), Some(cfg));
+        // Neither → platform default.
+        assert_eq!(choose_shell(None, None), None);
+    }
+
+    #[test]
+    fn arg_based_integration_rebuilds_default_shell_builder() {
+        let mut cmd = CommandBuilder::new_default_prog();
+        let injection = shell_integration::Injection {
+            env: std::collections::HashMap::new(),
+            args: vec!["-C".to_string(), "echo ready".to_string()],
+            force_non_login: false,
+            dir: None,
+        };
+
+        apply_shell_integration(&mut cmd, "/bin/fish", &injection);
+
+        assert!(!cmd.is_default_prog(), "argv can now be appended safely");
+        let argv: Vec<_> = cmd
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv, vec!["/bin/fish", "-C", "echo ready"]);
+    }
+
+    #[test]
+    fn env_only_integration_keeps_default_login_shell_builder() {
+        let mut cmd = CommandBuilder::new_default_prog();
+        let mut env = std::collections::HashMap::new();
+        env.insert("ZDOTDIR".to_string(), "/tmp/tty7-zdotdir-test".to_string());
+        let injection = shell_integration::Injection {
+            env,
+            args: Vec::new(),
+            force_non_login: false,
+            dir: None,
+        };
+
+        apply_shell_integration(&mut cmd, "/bin/zsh", &injection);
+
+        assert!(
+            cmd.is_default_prog(),
+            "zsh still launches as the login shell"
+        );
+        assert_eq!(
+            cmd.get_env("ZDOTDIR").and_then(|value| value.to_str()),
+            Some("/tmp/tty7-zdotdir-test")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detected_shell_override_uses_explicit_command_builder() {
+        let portable_shell = CommandBuilder::new_default_prog().get_shell();
+        let detected_shell = format!("{portable_shell}-detected");
+        let cmd = default_prog_with_override(Some(detected_shell.clone()));
+
+        assert!(!cmd.is_default_prog());
+        let argv: Vec<_> = cmd
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv, vec![detected_shell]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn no_detected_shell_keeps_portable_login_default() {
+        let cmd = default_prog_with_override(None);
+
+        assert!(cmd.is_default_prog());
+        assert!(!default_shell_name(&cmd).is_empty());
+    }
 
     /// A reader that finishes is joined and reported done — the common teardown
     /// path (group-kill closed the slave, the reader EOFed) returns cleanly.
