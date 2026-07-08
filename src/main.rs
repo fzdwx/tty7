@@ -228,6 +228,7 @@ fn main() {
     // path touches config/session/history files (the daemon socket path resolves
     // under this dir too, so the order matters).
     apply_config_dir_arg();
+    crate::core::logger::init();
 
     // Daemon mode: when launched with `--daemon` we run the headless persistent
     // terminal server and never open a window. This is the backing process the GUI

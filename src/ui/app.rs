@@ -22,6 +22,7 @@ use crate::core::session::{
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
 use crate::terminal::view::{ChildExited, CwdChanged, TerminalView};
+use crate::ui::file_tree::FileTreeCache;
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Pane};
 use crate::ui::preview::FilePreview;
@@ -121,6 +122,7 @@ pub struct Tty7App {
     pub(crate) workspace_snapshots: Vec<SessionWorkspace>,
     pub(crate) file_tree_root: PathBuf,
     pub(crate) file_tree_state: SessionFileTreeState,
+    pub(crate) file_tree_cache: FileTreeCache,
     /// Current global font size (px), applied to every pane in every tab.
     pub(crate) font_size: f32,
     /// Current global line-height multiplier, applied to every pane.
@@ -230,6 +232,7 @@ impl Tty7App {
             workspace_snapshots,
             file_tree_root,
             file_tree_state,
+            file_tree_cache: FileTreeCache::default(),
             font_size,
             line_height,
             font_family,

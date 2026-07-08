@@ -36,6 +36,13 @@ impl Tty7App {
 
     pub(super) fn toggle_file_tree_visibility(&mut self, cx: &mut Context<Self>) {
         self.file_tree_state.visible = !self.file_tree_state.visible;
+        log::debug!(
+            target: "tty7::file_tree",
+            "toggle file tree visibility visible={} root={} expanded_dirs={}",
+            self.file_tree_state.visible,
+            self.file_tree_root.display(),
+            self.file_tree_state.expanded_dirs.len()
+        );
         self.save_session(cx);
         cx.notify();
     }

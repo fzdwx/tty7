@@ -89,8 +89,8 @@ pub fn record(paint: Duration) {
     let mut guard = meter().lock().unwrap();
     let m = guard.get_or_insert_with(|| Meter::new(now));
     if let Some(line) = m.record(now, paint) {
-        // Direct to stderr: the app never initialises a `log` backend, so
-        // `log::info!` here would be silently dropped.
+        // Direct to stderr: this meter is gated by TTY7_FPS and should remain
+        // independent from RUST_LOG filtering.
         eprintln!("{line}");
     }
 }
