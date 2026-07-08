@@ -25,6 +25,8 @@ pub mod server;
 pub mod spawn;
 pub mod transport;
 
+pub(crate) const DETECTED_SHELL_ENV: &str = "TTY7_DETECTED_SHELL";
+
 // `pub(crate)` rather than private so a future non-daemon spawn path could reuse
 // the exact same rc-file setup; today `pane` is the only caller.
 pub(crate) mod shell_integration;

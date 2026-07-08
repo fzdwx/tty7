@@ -49,11 +49,38 @@ fn default_prog() -> CommandBuilder {
     CommandBuilder::new(crate::core::shells::windows_default_shell())
 }
 
-/// On Unix, defer to `portable-pty`, which launches the user's login shell from
-/// the passwd database (falling back to `/bin/sh`).
+/// On Unix, start from `portable-pty`'s login-shell builder, but switch to an
+/// explicit command when the GUI has already detected the shell that launched
+/// tty7 and forwarded it to the detached daemon. LaunchServices may otherwise
+/// give the daemon a stale config dir and stale `$SHELL`.
 #[cfg(not(windows))]
 fn default_prog() -> CommandBuilder {
-    CommandBuilder::new_default_prog()
+    default_prog_with_override(detected_shell_override())
+}
+
+#[cfg(not(windows))]
+fn default_prog_with_override(shell_override: Option<String>) -> CommandBuilder {
+    let cmd = CommandBuilder::new_default_prog();
+    let portable_shell = cmd.get_shell();
+    if let Some(shell) = shell_override.filter(|shell| shell != &portable_shell) {
+        return CommandBuilder::new(&shell);
+    }
+    cmd
+}
+
+#[cfg(not(windows))]
+fn detected_shell_override() -> Option<String> {
+    let path = std::env::var_os(crate::daemon::DETECTED_SHELL_ENV)?;
+    usable_shell_path(path)
+}
+
+#[cfg(not(windows))]
+fn usable_shell_path(path: std::ffi::OsString) -> Option<String> {
+    let path = PathBuf::from(path);
+    if path.as_os_str().is_empty() || !path.is_file() {
+        return None;
+    }
+    path.into_os_string().into_string().ok()
 }
 
 /// The program name used to detect which shell integration applies for the
@@ -81,6 +108,25 @@ fn choose_shell(
     configured: Option<(String, Vec<String>)>,
 ) -> Option<(String, Vec<String>)> {
     spawn_override.map(|s| (s.program, s.args)).or(configured)
+}
+
+fn apply_shell_integration(
+    cmd: &mut CommandBuilder,
+    resolved_program: &str,
+    integration: &shell_integration::Injection,
+) {
+    // `CommandBuilder::new_default_prog()` preserves the Unix login-shell argv0
+    // shape, but portable-pty intentionally panics if argv is appended to that
+    // sentinel builder. Integrations that need argv (fish `-C`, bash `--rcfile`,
+    // PowerShell flags) must use an explicit command builder first. Env-only zsh
+    // integration keeps the default login-shell path.
+    if integration.force_non_login || (cmd.is_default_prog() && !integration.args.is_empty()) {
+        *cmd = CommandBuilder::new(resolved_program);
+    }
+    cmd.args(&integration.args);
+    for (k, v) in &integration.env {
+        cmd.env(k, v);
+    }
 }
 
 /// Default cap on the replay ring: 8 MiB. Enough to reconstruct a deep screen +
@@ -299,16 +345,7 @@ impl DaemonPane {
             .is_some_and(|(_, args)| !args.is_empty());
         let integration = shell_integration::setup(Some(&resolved_program), has_custom_args);
         if let Some(integration) = &integration {
-            // Bash only takes `--rcfile` as a non-login shell, so rebuild `cmd` as
-            // a plain invocation of the resolved program rather than however
-            // `default_prog()` would otherwise spawn it (a login shell on Unix).
-            if integration.force_non_login {
-                cmd = CommandBuilder::new(&resolved_program);
-            }
-            cmd.args(&integration.args);
-            for (k, v) in &integration.env {
-                cmd.env(k, v);
-            }
+            apply_shell_integration(&mut cmd, &resolved_program, integration);
         }
         let integration_dir = integration.as_ref().and_then(|i| i.dir.clone());
 
@@ -1161,6 +1198,76 @@ mod tests {
         assert_eq!(choose_shell(None, Some(cfg.clone())), Some(cfg));
         // Neither → platform default.
         assert_eq!(choose_shell(None, None), None);
+    }
+
+    #[test]
+    fn arg_based_integration_rebuilds_default_shell_builder() {
+        let mut cmd = CommandBuilder::new_default_prog();
+        let injection = shell_integration::Injection {
+            env: std::collections::HashMap::new(),
+            args: vec!["-C".to_string(), "echo ready".to_string()],
+            force_non_login: false,
+            dir: None,
+        };
+
+        apply_shell_integration(&mut cmd, "/bin/fish", &injection);
+
+        assert!(!cmd.is_default_prog(), "argv can now be appended safely");
+        let argv: Vec<_> = cmd
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv, vec!["/bin/fish", "-C", "echo ready"]);
+    }
+
+    #[test]
+    fn env_only_integration_keeps_default_login_shell_builder() {
+        let mut cmd = CommandBuilder::new_default_prog();
+        let mut env = std::collections::HashMap::new();
+        env.insert("ZDOTDIR".to_string(), "/tmp/tty7-zdotdir-test".to_string());
+        let injection = shell_integration::Injection {
+            env,
+            args: Vec::new(),
+            force_non_login: false,
+            dir: None,
+        };
+
+        apply_shell_integration(&mut cmd, "/bin/zsh", &injection);
+
+        assert!(
+            cmd.is_default_prog(),
+            "zsh still launches as the login shell"
+        );
+        assert_eq!(
+            cmd.get_env("ZDOTDIR").and_then(|value| value.to_str()),
+            Some("/tmp/tty7-zdotdir-test")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detected_shell_override_uses_explicit_command_builder() {
+        let portable_shell = CommandBuilder::new_default_prog().get_shell();
+        let detected_shell = format!("{portable_shell}-detected");
+        let cmd = default_prog_with_override(Some(detected_shell.clone()));
+
+        assert!(!cmd.is_default_prog());
+        let argv: Vec<_> = cmd
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv, vec![detected_shell]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn no_detected_shell_keeps_portable_login_default() {
+        let cmd = default_prog_with_override(None);
+
+        assert!(cmd.is_default_prog());
+        assert!(!default_shell_name(&cmd).is_empty());
     }
 
     /// A reader that finishes is joined and reported done — the common teardown

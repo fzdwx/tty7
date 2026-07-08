@@ -158,6 +158,37 @@ impl RemoteTerminal {
         cwd: Option<PathBuf>,
         shell: Option<ShellSpec>,
     ) -> anyhow::Result<(Self, u64)> {
+        let retry_cwd = cwd.clone();
+        let retry_shell = shell.clone();
+        match Self::spawn_once(size, cell_w, cell_h, cwd, shell) {
+            Ok(term) => Ok(term),
+            Err(first_err) if daemon_disconnected_before_spawn_reply(&first_err) => {
+                // A live-but-old daemon can accept the connection, panic while
+                // handling Spawn, and close before replying. Restart once so an
+                // upgraded GUI cuts over cleanly instead of crashing on a stale
+                // background service.
+                if let Err(restart_err) = crate::daemon::spawn::restart() {
+                    return Err(anyhow::anyhow!(
+                        "daemon disconnected before Spawn reply ({first_err}); restart failed: {restart_err}"
+                    ));
+                }
+                Self::spawn_once(size, cell_w, cell_h, retry_cwd, retry_shell).map_err(|second_err| {
+                    anyhow::anyhow!(
+                        "daemon disconnected before Spawn reply ({first_err}); restarted daemon but Spawn still failed: {second_err}"
+                    )
+                })
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn spawn_once(
+        size: TermSize,
+        cell_w: u16,
+        cell_h: u16,
+        cwd: Option<PathBuf>,
+        shell: Option<ShellSpec>,
+    ) -> anyhow::Result<(Self, u64)> {
         let mut stream = connect()?;
         let win = win_size(size, cell_w, cell_h);
 
@@ -745,6 +776,19 @@ impl RemoteTerminal {
     }
 }
 
+fn daemon_disconnected_before_spawn_reply(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+            )
+        })
+    })
+}
+
 impl Drop for RemoteTerminal {
     fn drop(&mut self) {
         // Detach (don't kill): the daemon keeps the pane running so a later
@@ -945,6 +989,16 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn spawn_retry_only_for_daemon_disconnects() {
+        let eof: anyhow::Error =
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "closed").into();
+        assert!(daemon_disconnected_before_spawn_reply(&eof));
+
+        let refused = anyhow::anyhow!("daemon refused Spawn: configured shell missing");
+        assert!(!daemon_disconnected_before_spawn_reply(&refused));
+    }
 
     /// Without a real daemon, drive the reader path directly: a `UnixStream::pair`
     /// stands in for the connection. We hand `RemoteTerminal` one half (as if it

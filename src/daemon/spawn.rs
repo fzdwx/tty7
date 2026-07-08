@@ -15,6 +15,7 @@
 //! Then we poll the endpoint until it's connectable, so the caller can immediately
 //! proceed to connect.
 
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -128,6 +129,13 @@ fn spawn_detached() -> anyhow::Result<()> {
         cmd.arg("--config-dir").arg(dir);
     }
 
+    if let Some(shell) = detect_parent_shell() {
+        // The detached daemon's parent becomes launchd/systemd, so capture the
+        // shell that launched the GUI before detaching and let the pane builder
+        // prefer it over a stale `$SHELL` / passwd login-shell value.
+        cmd.env(crate::daemon::DETECTED_SHELL_ENV, shell);
+    }
+
     // A daemon has no controlling terminal or console: send all three std streams
     // to the null device so nothing inherits the GUI's handles.
     cmd.stdin(Stdio::null())
@@ -143,6 +151,51 @@ fn spawn_detached() -> anyhow::Result<()> {
         Ok(_child) => Ok(()),
         Err(e) => Err(anyhow::anyhow!("failed to spawn daemon process: {e}")),
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn detect_parent_shell() -> Option<PathBuf> {
+    parent_process_path(unsafe { libc::getppid() }).filter(|path| is_supported_shell(path))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn detect_parent_shell() -> Option<PathBuf> {
+    None
+}
+
+fn is_supported_shell(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "zsh" | "bash" | "fish" | "pwsh" | "powershell" | "powershell.exe" | "pwsh.exe"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn parent_process_path(pid: libc::pid_t) -> Option<PathBuf> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: valid buffer, and `proc_pidpath` writes at most `buf.len()` bytes.
+    let len =
+        unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
+    if len <= 0 {
+        return None;
+    }
+    Some(PathBuf::from(
+        String::from_utf8_lossy(&buf[..len as usize]).into_owned(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn parent_process_path(pid: libc::pid_t) -> Option<PathBuf> {
+    if pid <= 0 {
+        return None;
+    }
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
 
 /// Detach the child into its own session/process group so a GUI teardown can't
@@ -189,8 +242,21 @@ fn detach(cmd: &mut Command) {
 // port file with different semantics), so this test only runs on Unix.
 #[cfg(all(test, unix))]
 mod tests {
+    use super::*;
     use std::io::ErrorKind;
     use std::os::unix::net::UnixStream;
+    use std::path::Path;
+
+    #[test]
+    fn supported_shell_detection_matches_shell_basenames_only() {
+        assert!(is_supported_shell(Path::new("/opt/homebrew/bin/fish")));
+        assert!(is_supported_shell(Path::new("/bin/zsh")));
+        assert!(is_supported_shell(Path::new("/usr/bin/bash")));
+        assert!(!is_supported_shell(Path::new(
+            "/Applications/kitty.app/kitty"
+        )));
+        assert!(!is_supported_shell(Path::new("/usr/bin/omp")));
+    }
 
     /// A stale socket file (one nothing is listening on) must be treated as "not
     /// running": connecting to it fails, which is our trigger to clean up + spawn.
