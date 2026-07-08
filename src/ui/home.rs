@@ -17,7 +17,7 @@ use gpui::{
 use gpui_component::kbd::Kbd;
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
-use crate::core::session::{SessionPane, SessionTab};
+use crate::core::session::{SessionPane, SessionTab, SessionTabKind};
 use crate::ui::app::Tty7App;
 
 /// The "tty7" logotype in half-block characters. Rendered line-by-line in the
@@ -59,9 +59,14 @@ fn closed_tab_label(tab: &SessionTab) -> Option<String> {
             return Some(clamp_label(name));
         }
     }
-    first_leaf_cwd(&tab.pane)
-        .and_then(|p| p.file_name())
-        .map(|s| clamp_label(&s.to_string_lossy()))
+    match &tab.kind {
+        SessionTabKind::Terminal { pane } => first_leaf_cwd(pane)
+            .and_then(|p| p.file_name())
+            .map(|s| clamp_label(&s.to_string_lossy())),
+        SessionTabKind::Preview { path } => {
+            path.file_name().map(|s| clamp_label(&s.to_string_lossy()))
+        }
+    }
 }
 
 /// The first leaf (in layout order) that saved a cwd, depth-first.
@@ -189,64 +194,46 @@ mod tests {
 
     #[test]
     fn closed_tab_label_prefers_the_user_set_name() {
-        let tab = SessionTab {
-            name: Some("build".into()),
-            pane: leaf(Some("/work/getty")),
-        };
+        let tab = SessionTab::terminal(Some("build".into()), leaf(Some("/work/getty")));
         assert_eq!(closed_tab_label(&tab).as_deref(), Some("build"));
     }
 
     #[test]
     fn closed_tab_label_falls_back_to_the_first_leaf_cwd_dir_name() {
-        let tab = SessionTab {
-            name: None,
-            pane: leaf(Some("/work/getty")),
-        };
+        let tab = SessionTab::terminal(None, leaf(Some("/work/getty")));
         assert_eq!(closed_tab_label(&tab).as_deref(), Some("getty"));
 
         // Whitespace-only names don't count as names.
-        let tab = SessionTab {
-            name: Some("   ".into()),
-            pane: leaf(Some("/work/getty")),
-        };
+        let tab = SessionTab::terminal(Some("   ".into()), leaf(Some("/work/getty")));
         assert_eq!(closed_tab_label(&tab).as_deref(), Some("getty"));
     }
 
     #[test]
     fn closed_tab_label_searches_splits_for_the_first_cwd() {
-        let tab = SessionTab {
-            name: None,
-            pane: SessionPane::Split {
+        let tab = SessionTab::terminal(
+            None,
+            SessionPane::Split {
                 axis: crate::core::session::SessionAxis::Horizontal,
                 ratio: 0.5,
                 a: Box::new(leaf(None)),
                 b: Box::new(leaf(Some("/tmp/demo"))),
             },
-        };
+        );
         assert_eq!(closed_tab_label(&tab).as_deref(), Some("demo"));
     }
 
     #[test]
     fn closed_tab_label_is_none_when_nothing_is_known() {
         // No name, no cwd — and "/" has no file name either.
-        let unnamed = SessionTab {
-            name: None,
-            pane: leaf(None),
-        };
+        let unnamed = SessionTab::terminal(None, leaf(None));
         assert_eq!(closed_tab_label(&unnamed), None);
-        let root = SessionTab {
-            name: None,
-            pane: leaf(Some("/")),
-        };
+        let root = SessionTab::terminal(None, leaf(Some("/")));
         assert_eq!(closed_tab_label(&root), None);
     }
 
     #[test]
     fn closed_tab_label_clamps_runaway_names() {
-        let tab = SessionTab {
-            name: Some("a".repeat(40)),
-            pane: leaf(None),
-        };
+        let tab = SessionTab::terminal(Some("a".repeat(40)), leaf(None));
         let label = closed_tab_label(&tab).unwrap();
         assert_eq!(label.chars().count(), CLOSED_LABEL_MAX + 1);
         assert!(label.ends_with('…'));

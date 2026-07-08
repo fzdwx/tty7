@@ -6,12 +6,15 @@
 //! depends back on `ui`.
 
 pub mod app;
+pub mod file_tree;
 pub mod hints;
 pub mod home;
 pub mod keymap;
 pub mod palette;
 pub mod pane;
 pub mod presets;
+pub mod preview;
 pub mod settings;
 pub mod tab_strip;
 pub mod theme;
+pub mod workspace;

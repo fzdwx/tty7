@@ -52,6 +52,12 @@ pub struct ChildExited;
 
 impl gpui::EventEmitter<ChildExited> for TerminalView {}
 
+pub struct CwdChanged {
+    pub cwd: std::path::PathBuf,
+}
+
+impl gpui::EventEmitter<CwdChanged> for TerminalView {}
+
 pub struct TerminalView {
     pub terminal: RemoteTerminal,
     /// Daemon-assigned id of the pane this view mirrors. Persisted in the session
@@ -1589,6 +1595,7 @@ impl TerminalView {
             && self.ranked_cwd.as_ref() != Some(&cwd)
         {
             self.rerank_history(Some(&cwd));
+            cx.emit(CwdChanged { cwd });
         }
 
         // Redraw when the prompt/running state flips, so the line editor shows or

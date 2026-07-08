@@ -114,6 +114,9 @@ impl Tty7App {
         if tab.is_settings() {
             return IconName::Settings;
         }
+        if tab.is_preview() {
+            return IconName::File;
+        }
         icon_for_title(&tab.leaf_title(cx))
     }
 

@@ -7,8 +7,10 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui::{App, Bounds, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Window, canvas, div};
-use gpui::{Axis, Entity, prelude::*, px};
+use gpui::{
+    App, Bounds, Entity, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Window, canvas, div,
+};
+use gpui::{Axis, prelude::*, px};
 use gpui_component::ActiveTheme as _;
 
 use crate::terminal::view::TerminalView;
@@ -19,9 +21,6 @@ const MAX_RATIO: f32 = 0.9;
 /// Thickness (px) of the draggable divider between two split children.
 const DIVIDER_THICKNESS: f32 = 5.;
 
-/// The leaf payload is generic (defaulting to the real terminal view) so the
-/// pure tree logic can be exercised in tests with plain values; at runtime
-/// `Pane` is always `Pane<Entity<TerminalView>>`.
 pub enum Pane<L = Entity<TerminalView>> {
     Leaf(L),
     Split {
@@ -72,7 +71,7 @@ impl<L: Clone> Pane<L> {
         }
     }
 
-    pub fn collect_leaves<'a>(&'a self, out: &mut Vec<L>) {
+    pub fn collect_leaves(&self, out: &mut Vec<L>) {
         match self {
             Pane::Leaf(v) => out.push(v.clone()),
             Pane::Split { a, b, .. } => {
@@ -168,7 +167,6 @@ impl<L: Clone> Pane<L> {
     }
 }
 
-/// Focus- and render-aware operations on the concrete terminal-view tree.
 impl Pane<Entity<TerminalView>> {
     /// The currently focused leaf, if any.
     pub fn focused_leaf(&self, window: &Window, cx: &App) -> Option<Entity<TerminalView>> {
@@ -196,6 +194,18 @@ impl Pane<Entity<TerminalView>> {
         self.focused_leaf(window, cx).or_else(|| self.first_leaf())
     }
 
+    pub fn terminal_leaves(&self) -> Vec<Entity<TerminalView>> {
+        self.leaves()
+    }
+
+    pub fn focused_or_first_terminal(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> Option<Entity<TerminalView>> {
+        self.focused_or_first(window, cx)
+    }
+
     /// Split a specific leaf (matched by entity identity) along `axis`, inserting
     /// `new` as the second child. The target must be captured *before* creating
     /// `new`, since constructing a terminal steals window focus.
@@ -213,11 +223,7 @@ impl Pane<Entity<TerminalView>> {
         self.close_leaf_where(&|v| v.read(cx).focus_handle.contains_focused(window, cx))
     }
 
-    /// Remove a specific leaf (matched by entity identity), collapsing its
-    /// parent split into the sibling. Used when a pane closes for a reason
-    /// other than user focus — its child exited on its own — so the leaf to
-    /// remove is the exited one, wherever focus happens to be.
-    pub fn close_leaf(&mut self, target: &Entity<TerminalView>) -> CloseOutcome {
+    pub fn close_terminal(&mut self, target: &Entity<TerminalView>) -> CloseOutcome {
         self.close_leaf_where(&|v| v.entity_id() == target.entity_id())
     }
 

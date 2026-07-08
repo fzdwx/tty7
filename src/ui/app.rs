@@ -1,6 +1,8 @@
 //! The window shell: a transparent unified title bar carrying the tab strip,
 //! with the active terminal filling the rest. Owns all tabs (each its own PTY).
 
+use std::path::{Path, PathBuf};
+
 use gpui::{
     App, Axis, Context, Entity, KeyDownEvent, PromptLevel, Subscription, Window, div, prelude::*,
     px,
@@ -13,10 +15,14 @@ use gpui_component::{ActiveTheme as _, IndexPath, TitleBar};
 
 use crate::core::actions::*;
 use crate::core::config::{Config, NewTabPosition, ShellConfig, color_or, hsla_to_hex6};
-use crate::core::session::{Session, SessionAxis, SessionPane, SessionTab};
-use crate::terminal::view::{ChildExited, TerminalView};
+use crate::core::session::{
+    Session, SessionAxis, SessionFileTreeState, SessionPane, SessionTab, SessionTabKind,
+    SessionWorkspace,
+};
+use crate::terminal::view::{ChildExited, CwdChanged, TerminalView};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Pane};
+use crate::ui::preview::FilePreview;
 use crate::ui::settings::{ColorKey, SettingsSection, SettingsState};
 use crate::ui::theme::{apply_theme, set_menus};
 
@@ -35,11 +41,11 @@ pub(crate) const LINE_HEIGHT_STEP: f32 = 0.05;
 /// otherwise keep growing without limit.
 const MAX_CLOSED_TABS: usize = 20;
 
-/// One tab: a split-pane tree plus an optional user-assigned name.
 pub struct Tab {
     /// The tab's split-pane tree (one or more terminals). For a settings tab
     /// this is `Pane::Empty` — the body renders the settings panel instead.
     pub pane: Pane,
+    pub preview: Option<Entity<FilePreview>>,
     /// User-set custom name (via "Rename Tab"). `None` → derive the label from
     /// the focused terminal's title at render time.
     pub name: Option<String>,
@@ -49,9 +55,19 @@ pub struct Tab {
 }
 
 impl Tab {
-    fn new(pane: Pane) -> Self {
+    pub(crate) fn new(pane: Pane) -> Self {
         Self {
             pane,
+            preview: None,
+            name: None,
+            settings: None,
+        }
+    }
+
+    pub(crate) fn preview(view: Entity<FilePreview>) -> Self {
+        Self {
+            pane: Pane::Empty,
+            preview: Some(view),
             name: None,
             settings: None,
         }
@@ -62,13 +78,20 @@ impl Tab {
         self.settings.is_some()
     }
 
+    pub(crate) fn is_preview(&self) -> bool {
+        self.preview.is_some()
+    }
+
     /// The title of the tab's representative terminal (its first leaf), used to
     /// derive both the tab label and its context icon. Empty when there's no
     /// terminal or no title yet.
     pub(crate) fn leaf_title(&self, cx: &App) -> String {
+        if let Some(preview) = &self.preview {
+            return preview.read(cx).title();
+        }
         self.pane
             .first_leaf()
-            .map(|l| l.read(cx).title.clone())
+            .map(|leaf| leaf.read(cx).title.clone())
             .unwrap_or_default()
     }
 }
@@ -86,6 +109,10 @@ pub struct Tty7App {
     /// The open tabs; each owns a split-pane tree and an optional name.
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
+    pub(crate) active_workspace: usize,
+    pub(crate) workspace_snapshots: Vec<SessionWorkspace>,
+    pub(crate) file_tree_root: PathBuf,
+    pub(crate) file_tree_state: SessionFileTreeState,
     /// Current global font size (px), applied to every pane in every tab.
     pub(crate) font_size: f32,
     /// Current global line-height multiplier, applied to every pane.
@@ -123,7 +150,7 @@ pub struct Tty7App {
     pub(crate) renaming: Option<Renaming>,
     /// When `Some`, the active tab renders only this one leaf full-window
     /// (Cmd+Shift+Enter maximize). Cleared on any structural / navigation change.
-    maximized: Option<Entity<TerminalView>>,
+    pub(crate) maximized: Option<Entity<TerminalView>>,
     /// Whether the tab chips currently show their ⌘1…⌘9 switch badges
     /// (shown while bare ⌘/Ctrl is held; see `hints::on_modifiers_changed`).
     pub(crate) mod_hint_badges: bool,
@@ -163,21 +190,33 @@ impl Tty7App {
         // cwd). A session with zero tabs is a real state — the user quit from
         // the home page — and restores back to it; only a *missing/unreadable*
         // session (first run) falls back to spawning a default terminal.
-        let (tabs, active) = match Session::load() {
-            // First run (no session file): the very first terminal has no
-            // predecessor to inherit from, so start in the app's current
-            // directory (None → default behavior).
-            None => {
-                let first = new_terminal(font_size, None, None, window, cx);
-                (vec![Tab::new(Pane::leaf(first))], 0)
-            }
-            // A saved session (with tabs, or an empty home-page state): rebuild it
-            // the same way a daemon restart does.
-            some => tabs_from_session(some, font_size, window, cx),
-        };
+        let (tabs, active, active_workspace, workspace_snapshots, file_tree_root, file_tree_state) =
+            match Session::load() {
+                // First run (no session file): the very first terminal has no
+                // predecessor to inherit from, so start in the app's current
+                // directory (None → default behavior).
+                None => {
+                    let first = new_terminal(font_size, None, None, window, cx);
+                    (
+                        vec![Tab::new(Pane::leaf(first))],
+                        0,
+                        0,
+                        Vec::new(),
+                        default_workspace_root(),
+                        SessionFileTreeState::default(),
+                    )
+                }
+                // A saved session (with tabs, or an empty home-page state): rebuild it
+                // the same way a daemon restart does.
+                some => tabs_from_session(some, font_size, window, cx),
+            };
         let app = Self {
             tabs,
             active,
+            active_workspace,
+            workspace_snapshots,
+            file_tree_root,
+            file_tree_state,
             font_size,
             line_height,
             font_family,
@@ -259,32 +298,55 @@ impl Tty7App {
     /// Snapshot the current tabs/active index into a `Session` and persist it.
     /// Called after every structural change; the write is a small synchronous
     /// JSON dump and any error is swallowed inside `Session::save`.
-    fn save_session(&self, cx: &App) {
-        // The settings tab is ephemeral — exclude it, and clamp `active` into the
-        // remaining terminal tabs so the next launch restores a real tab.
+    pub(crate) fn save_session(&self, cx: &App) {
+        let (active, tabs) = self.session_tabs(cx);
+        let mut workspaces = self.workspace_snapshots.clone();
+        let session = if tabs.is_empty() {
+            if workspaces.is_empty() {
+                Session::default()
+            } else {
+                let index = self.active_workspace.min(workspaces.len() - 1);
+                workspaces[index] = workspaces[index].clone().with_tabs(0, Vec::new());
+                workspaces[index].root = self.file_tree_root.clone();
+                workspaces[index].file_tree = self.file_tree_state.clone();
+                Session::from_workspaces(index, workspaces)
+            }
+        } else if workspaces.is_empty() {
+            let mut session = Session::from_tabs(active, tabs);
+            if let Some(workspace) = session.workspaces.first_mut() {
+                *workspace = workspace
+                    .clone()
+                    .with_file_tree_snapshot(&self.file_tree_root, &self.file_tree_state);
+            }
+            session
+        } else {
+            let index = self.active_workspace.min(workspaces.len() - 1);
+            workspaces[index] = workspaces[index]
+                .clone()
+                .with_tabs(active, tabs)
+                .with_file_tree_snapshot(&self.file_tree_root, &self.file_tree_state);
+            Session::from_workspaces(index, workspaces)
+        };
+        session.save();
+    }
+
+    pub(crate) fn session_tabs(&self, cx: &App) -> (usize, Vec<SessionTab>) {
         let tabs: Vec<SessionTab> = self
             .tabs
             .iter()
             .filter(|tab| !tab.is_settings())
             .map(|tab| tab_to_session(tab, cx))
             .collect();
-        // Zero terminal tabs is a real state (the home page) and is persisted as
-        // such, so the next launch comes back to it instead of a fresh shell.
-        if tabs.is_empty() {
-            Session::default().save();
-            return;
-        }
-        // Remap `self.active` (an index into the *unfiltered* tabs) into the
-        // filtered list: it's the number of non-settings tabs before it. A plain
-        // `min` clamp is wrong when the settings tab sits *before* the active one
-        // — it would shift the restored selection onto the wrong tab.
-        let active = self.tabs[..self.active.min(self.tabs.len())]
-            .iter()
-            .filter(|tab| !tab.is_settings())
-            .count()
-            .min(tabs.len() - 1);
-        let session = Session { active, tabs };
-        session.save();
+        let active = if tabs.is_empty() {
+            0
+        } else {
+            self.tabs[..self.active.min(self.tabs.len())]
+                .iter()
+                .filter(|tab| !tab.is_settings())
+                .count()
+                .min(tabs.len() - 1)
+        };
+        (active, tabs)
     }
 
     /// Reopen the most recently closed tab (Cmd+Shift+T). Rebuilds its pane
@@ -295,17 +357,10 @@ impl Tty7App {
             return;
         };
         let alive = alive_panes();
-        let pane = session_to_pane(&st.pane, &alive, self.font_size, window, cx);
+        let tab = session_to_tab(&st, &alive, self.font_size, window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
-        self.tabs.insert(
-            insert_at,
-            Tab {
-                pane,
-                name: st.name,
-                settings: None,
-            },
-        );
+        self.tabs.insert(insert_at, tab);
         self.active = insert_at;
         self.focus_active(window, cx);
         self.save_session(cx);
@@ -370,10 +425,20 @@ impl Tty7App {
                 match &restarted {
                     Ok(()) => {
                         let font_size = this.font_size;
-                        let (tabs, active) =
-                            tabs_from_session(Session::load(), font_size, window, cx);
+                        let (
+                            tabs,
+                            active,
+                            active_workspace,
+                            workspace_snapshots,
+                            file_tree_root,
+                            file_tree_state,
+                        ) = tabs_from_session(Session::load(), font_size, window, cx);
                         this.tabs = tabs;
                         this.active = active;
+                        this.active_workspace = active_workspace;
+                        this.workspace_snapshots = workspace_snapshots;
+                        this.file_tree_root = file_tree_root;
+                        this.file_tree_state = file_tree_state;
                     }
                     // The fresh daemon never came up; rebuilding would panic in
                     // `new_terminal`'s connect `.expect`. Stay on the home page and
@@ -397,7 +462,7 @@ impl Tty7App {
         self.font_size = size;
         let px_size = px(size);
         for tab in &self.tabs {
-            for leaf in tab.pane.leaves() {
+            for leaf in tab.pane.terminal_leaves() {
                 leaf.update(cx, |v, cx| {
                     v.font_size = px_size;
                     cx.notify();
@@ -430,7 +495,7 @@ impl Tty7App {
         let mul = mul.clamp(LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
         self.line_height = mul;
         for tab in &self.tabs {
-            for leaf in tab.pane.leaves() {
+            for leaf in tab.pane.terminal_leaves() {
                 leaf.update(cx, |v, cx| {
                     v.line_height_mul = mul;
                     cx.notify();
@@ -531,7 +596,7 @@ impl Tty7App {
     ) {
         self.update_config(cx, |cfg| cfg.cursor_style = style);
         for tab in &self.tabs {
-            for leaf in tab.pane.leaves() {
+            for leaf in tab.pane.terminal_leaves() {
                 leaf.update(cx, |_v, cx| cx.notify());
             }
         }
@@ -565,7 +630,7 @@ impl Tty7App {
         // force every pane's cursor back on so it doesn't stick invisible.
         if !on {
             for tab in &self.tabs {
-                for leaf in tab.pane.leaves() {
+                for leaf in tab.pane.terminal_leaves() {
                     leaf.update(cx, |v, cx| {
                         v.cursor_visible = true;
                         cx.notify();
@@ -625,7 +690,7 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.startup_mode = mode);
     }
 
-    fn focus_active(&self, window: &mut Window, cx: &mut App) {
+    pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut App) {
         let Some(tab) = self.tabs.get(self.active) else {
             // No tabs → the home page is showing; keep something focused so
             // keystrokes stay on the window's dispatch path (⌘T etc. must still
@@ -636,6 +701,9 @@ impl Tty7App {
         // Settings tab: route focus to its panel so Esc-to-close works.
         if let Some(settings) = tab.settings.as_ref() {
             window.focus(&settings.focus_handle, cx);
+        } else if let Some(preview) = tab.preview.as_ref() {
+            let handle = preview.read(cx).focus_handle.clone();
+            window.focus(&handle, cx);
         } else if let Some(leaf) = tab.pane.first_leaf() {
             let handle = leaf.read(cx).focus_handle.clone();
             window.focus(&handle, cx);
@@ -644,6 +712,11 @@ impl Tty7App {
 
     fn focus_leaf(&self, leaf: &Entity<TerminalView>, window: &mut Window, cx: &mut App) {
         let handle = leaf.read(cx).focus_handle.clone();
+        window.focus(&handle, cx);
+    }
+
+    fn focus_preview(&self, preview: &Entity<FilePreview>, window: &mut Window, cx: &mut App) {
+        let handle = preview.read(cx).focus_handle.clone();
         window.focus(&handle, cx);
     }
 
@@ -660,11 +733,22 @@ impl Tty7App {
     pub(crate) fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Inherit the cwd of the active tab's focused terminal so the new tab
         // opens in the same directory the user is currently working in.
-        let cwd = self.tabs.get(self.active).and_then(|t| {
-            t.pane
-                .focused_or_first(window, cx)
-                .and_then(|leaf| leaf.read(cx).cwd())
-        });
+        let cwd = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| {
+                if let Some(preview) = t.preview.as_ref() {
+                    return preview
+                        .read(cx)
+                        .path
+                        .parent()
+                        .map(std::path::Path::to_path_buf);
+                }
+                t.pane
+                    .focused_or_first(window, cx)
+                    .and_then(|leaf| leaf.read(cx).cwd())
+            })
+            .or_else(|| Some(self.file_tree_root.clone()));
         let tab = new_terminal(self.font_size, cwd, None, window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
@@ -690,13 +774,13 @@ impl Tty7App {
         // The new pane inherits the cwd of the pane being split.
         let cwd = target.read(cx).cwd();
         let new = new_terminal(self.font_size, cwd, None, window, cx);
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            if tab.pane.split_leaf(&target, axis, new.clone()) {
-                self.maximized = None;
-                self.focus_leaf(&new, window, cx);
-                self.save_session(cx);
-                cx.notify();
-            }
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && tab.pane.split_leaf(&target, axis, new.clone())
+        {
+            self.maximized = None;
+            self.focus_leaf(&new, window, cx);
+            self.save_session(cx);
+            cx.notify();
         }
     }
 
@@ -706,12 +790,18 @@ impl Tty7App {
         // Capture the focused leaf before closing: if a split collapses, that
         // leaf is destroyed with no reopen path, so we kill its daemon pane. Owned
         // clones from `leaves()` end the borrow before the `&mut` close below.
-        let focused = self.tabs.get(self.active).and_then(|tab| {
-            tab.pane
-                .leaves()
-                .into_iter()
-                .find(|l| l.read(cx).focus_handle.contains_focused(window, cx))
-        });
+        let focused_terminal = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.pane.focused_leaf(window, cx));
+        if self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.is_preview())
+        {
+            self.close_tab(self.active, window, cx);
+            return;
+        }
         let outcome = match self.tabs.get_mut(self.active) {
             Some(tab) => tab.pane.close_focused(window, cx),
             None => return,
@@ -736,7 +826,7 @@ impl Tty7App {
                 }
             }
             CloseOutcome::Collapsed => {
-                if let Some(leaf) = &focused {
+                if let Some(leaf) = &focused_terminal {
                     crate::terminal::RemoteTerminal::kill_pane(leaf.read(cx).pane_id);
                 }
                 self.focus_active(window, cx);
@@ -760,14 +850,15 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let id = view.entity_id();
-        let Some(index) = self
-            .tabs
-            .iter()
-            .position(|tab| tab.pane.leaves().iter().any(|l| l.entity_id() == id))
-        else {
+        let Some(index) = self.tabs.iter().position(|tab| {
+            tab.pane
+                .terminal_leaves()
+                .iter()
+                .any(|l| l.entity_id() == id)
+        }) else {
             return; // already closed (e.g. by the user racing the exit)
         };
-        match self.tabs[index].pane.close_leaf(&view) {
+        match self.tabs[index].pane.close_terminal(&view) {
             // The exited pane was the tab's only leaf: close the whole tab
             // (which snapshots it for reopen and kills its daemon panes).
             CloseOutcome::RemoveSelf => self.close_tab(index, window, cx),
@@ -800,7 +891,7 @@ impl Tty7App {
         self.maximized = None;
         let current = leaves
             .iter()
-            .position(|l| l.read(cx).focus_handle.contains_focused(window, cx))
+            .position(|leaf| leaf.read(cx).focus_handle.contains_focused(window, cx))
             .unwrap_or(0);
         let next = if forward {
             (current + 1) % leaves.len()
@@ -842,7 +933,7 @@ impl Tty7App {
         let leaf = tab.pane.focused_or_first(window, cx);
         if let Some(leaf) = leaf {
             let handle = leaf.read(cx).focus_handle.clone();
-            self.maximized = Some(leaf);
+            self.maximized = Some(leaf.clone());
             window.focus(&handle, cx);
             cx.notify();
         }
@@ -858,9 +949,6 @@ impl Tty7App {
         // A rename in progress stores a fixed tab index; removing a tab shifts
         // indices and would let the pending edit commit onto the wrong tab. Drop it.
         self.renaming = None;
-        // Snapshot the tab (layout + each pane's current cwd + name) onto the
-        // recently-closed stack so Cmd+Shift+T can bring it back. The settings
-        // tab is ephemeral, so it is never snapshotted or reopened this way.
         if !self.tabs[index].is_settings() {
             let snapshot = tab_to_session(&self.tabs[index], cx);
             self.closed.push(snapshot);
@@ -872,7 +960,7 @@ impl Tty7App {
             // *quitting* the app, where panes are detached and kept alive so the
             // next launch can re-attach. Reopen-closed-tab then spawns fresh in the
             // saved cwd, just like before the daemon split.
-            for leaf in self.tabs[index].pane.leaves() {
+            for leaf in self.tabs[index].pane.terminal_leaves() {
                 crate::terminal::RemoteTerminal::kill_pane(leaf.read(cx).pane_id);
             }
         }
@@ -1074,7 +1162,7 @@ impl Tty7App {
                 if let Some(leaf) = self
                     .tabs
                     .get(self.active)
-                    .and_then(|t| t.pane.focused_or_first(window, cx))
+                    .and_then(|t| t.pane.focused_or_first_terminal(window, cx))
                 {
                     leaf.update(cx, |view, cx| view.open_search(window, cx));
                 }
@@ -1085,7 +1173,7 @@ impl Tty7App {
                 if let Some(leaf) = self
                     .tabs
                     .get(self.active)
-                    .and_then(|t| t.pane.focused_or_first(window, cx))
+                    .and_then(|t| t.pane.focused_or_first_terminal(window, cx))
                 {
                     leaf.update(cx, |view, cx| view.clear_scrollback(cx));
                 }
@@ -1133,6 +1221,7 @@ impl Tty7App {
         self.maximized = None;
         self.tabs.push(Tab {
             pane: Pane::Empty,
+            preview: None,
             name: Some("Settings".to_string()),
             settings: Some(SettingsState {
                 focus_handle: focus_handle.clone(),
@@ -1384,7 +1473,7 @@ impl Tty7App {
     fn commit_font_family(&mut self, family: String, cx: &mut Context<Self>) {
         self.font_family = family.clone();
         for tab in &self.tabs {
-            for leaf in tab.pane.leaves() {
+            for leaf in tab.pane.terminal_leaves() {
                 let family = family.clone();
                 leaf.update(cx, |v, cx| v.set_font_family(family, cx));
             }
@@ -1401,7 +1490,7 @@ impl Tty7App {
     fn commit_font_family_emphasis(&mut self, bold: bool, name: String, cx: &mut Context<Self>) {
         let family = (name != crate::ui::settings::FONT_DEFAULT_LABEL).then_some(name);
         for tab in &self.tabs {
-            for leaf in tab.pane.leaves() {
+            for leaf in tab.pane.terminal_leaves() {
                 let family = family.clone();
                 leaf.update(cx, |v, cx| {
                     if bold {
@@ -1448,7 +1537,7 @@ impl Tty7App {
             self.font_size = font_size;
             let px_size = px(font_size);
             for tab in &self.tabs {
-                for leaf in tab.pane.leaves() {
+                for leaf in tab.pane.terminal_leaves() {
                     leaf.update(cx, |v, cx| {
                         v.font_size = px_size;
                         cx.notify();
@@ -1459,7 +1548,7 @@ impl Tty7App {
         if line_height != self.line_height {
             self.line_height = line_height;
             for tab in &self.tabs {
-                for leaf in tab.pane.leaves() {
+                for leaf in tab.pane.terminal_leaves() {
                     leaf.update(cx, |v, cx| {
                         v.line_height_mul = line_height;
                         cx.notify();
@@ -1470,7 +1559,7 @@ impl Tty7App {
         if font_family != self.font_family {
             self.font_family = font_family.clone();
             for tab in &self.tabs {
-                for leaf in tab.pane.leaves() {
+                for leaf in tab.pane.terminal_leaves() {
                     let family = font_family.clone();
                     leaf.update(cx, |v, cx| v.set_font_family(family, cx));
                 }
@@ -1483,7 +1572,7 @@ impl Tty7App {
         if bold != self.font_family_bold {
             self.font_family_bold = bold.clone();
             for tab in &self.tabs {
-                for leaf in tab.pane.leaves() {
+                for leaf in tab.pane.terminal_leaves() {
                     let bold = bold.clone();
                     leaf.update(cx, |v, cx| v.set_font_family_bold(bold, cx));
                 }
@@ -1492,7 +1581,7 @@ impl Tty7App {
         if italic != self.font_family_italic {
             self.font_family_italic = italic.clone();
             for tab in &self.tabs {
-                for leaf in tab.pane.leaves() {
+                for leaf in tab.pane.terminal_leaves() {
                     let italic = italic.clone();
                     leaf.update(cx, |v, cx| v.set_font_family_italic(italic, cx));
                 }
@@ -1610,6 +1699,40 @@ impl Tty7App {
         cx.notify();
     }
 
+    pub(crate) fn open_file_preview(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = canonical_preview_path(path);
+        self.file_tree_state.selected_path = Some(path.clone());
+        if let Some((index, preview)) = self.find_preview_tab(&path, cx) {
+            self.active = index;
+            self.maximized = None;
+            self.focus_preview(&preview, window, cx);
+            self.save_session(cx);
+            cx.notify();
+            return;
+        }
+
+        let preview = new_preview(path, cx);
+        self.maximized = None;
+        let insert_at = self.new_tab_insert_at(cx);
+        self.tabs.insert(insert_at, Tab::preview(preview.clone()));
+        self.active = insert_at;
+        self.focus_preview(&preview, window, cx);
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    fn find_preview_tab(&self, path: &Path, cx: &App) -> Option<(usize, Entity<FilePreview>)> {
+        self.tabs.iter().enumerate().find_map(|(index, tab)| {
+            let preview = tab.preview.as_ref()?;
+            (preview.read(cx).path.as_path() == path).then(|| (index, preview.clone()))
+        })
+    }
+
     /// Open `config.json` with the OS default handler (Settings → Keybindings).
     /// A fresh install may never have saved yet, so write the current config
     /// first — the button must not point at a missing file.
@@ -1645,6 +1768,11 @@ impl Render for Tty7App {
             None => self.render_home(cx).into_any_element(),
             // The settings tab renders its panel instead of a terminal pane.
             Some(tab) if tab.is_settings() => self.render_settings(cx).into_any_element(),
+            Some(tab) if tab.is_preview() => tab
+                .preview
+                .as_ref()
+                .map(|preview| preview.clone().into_any_element())
+                .unwrap_or_else(|| div().into_any_element()),
             Some(active_tab) => {
                 // If a pane is maximized and it belongs to the active tab, render
                 // just that leaf full-window; otherwise the normal split layout.
@@ -1673,7 +1801,6 @@ impl Render for Tty7App {
             .id("tty7-root")
             .size_full()
             .flex()
-            .flex_col()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -1730,31 +1857,53 @@ impl Render for Tty7App {
             // than relying solely on the global handler (which the keystroke
             // doesn't reach while focus is deep in the terminal view).
             .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
+            .child(self.render_workspace_switcher(cx))
             .child(
-                TitleBar::new()
-                    // Taller than the stock 34px bar so the tabs read substantial
-                    // and roomy instead of cramped. `.h(..)` lands
-                    // in the component's `refine_style`, which is applied after its
-                    // own `.h(TITLE_BAR_HEIGHT)`, so this override wins.
-                    .h(px(40.))
-                    .bg(cx.theme().transparent)
-                    .border_color(cx.theme().transparent)
-                    // The tab strip anchors left; the title bar keeps its right
-                    // edge clear (before the traffic lights' mirror gap on macOS).
-                    .child(strip),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        TitleBar::new()
+                            // Taller than the stock 34px bar so the tabs read substantial
+                            // and roomy instead of cramped. `.h(..)` lands
+                            // in the component's `refine_style`, which is applied after its
+                            // own `.h(TITLE_BAR_HEIGHT)`, so this override wins.
+                            .h(px(40.))
+                            .bg(cx.theme().transparent)
+                            .border_color(cx.theme().transparent)
+                            // The tab strip anchors left; the title bar keeps its right
+                            // edge clear (before the traffic lights' mirror gap on macOS).
+                            .child(strip),
+                    )
+                    .child({
+                        let main = div()
+                            .flex_1()
+                            .min_w_0()
+                            .relative()
+                            .overflow_hidden()
+                            .child(body);
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .child(main)
+                            .when(self.file_tree_state.visible, |layout| {
+                                layout.child(self.render_file_tree(cx))
+                            })
+                    })
+                    .when_some(self.palette.clone(), |this, palette| this.child(palette)),
             )
-            .child(div().flex_1().relative().overflow_hidden().child(body))
-            // Command palette overlay, layered above everything when open.
-            .when_some(self.palette.clone(), |this, palette| this.child(palette))
     }
 }
 
-/// Convert a live `Tab` (pane tree + name) into its serializable mirror.
 fn tab_to_session(tab: &Tab, cx: &App) -> SessionTab {
-    SessionTab {
-        name: tab.name.clone(),
-        pane: pane_to_session(&tab.pane, cx),
+    if let Some(preview) = tab.preview.as_ref() {
+        return SessionTab::preview(tab.name.clone(), preview.read(cx).path.clone());
     }
+    SessionTab::terminal(tab.name.clone(), pane_to_session(&tab.pane, cx))
 }
 
 /// Convert a live `Pane` tree into its serializable mirror, reading each
@@ -1791,7 +1940,7 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
 /// Set of daemon pane ids currently alive, used by `session_to_pane` to decide
 /// per leaf whether to re-`attach` or `spawn`. Computed once per restore from the
 /// daemon's `List`; empty (→ all-fresh) when the daemon is unreachable.
-fn alive_panes() -> std::collections::HashSet<u64> {
+pub(crate) fn alive_panes() -> std::collections::HashSet<u64> {
     crate::terminal::RemoteTerminal::list_panes()
         .into_iter()
         .filter(|p| p.alive)
@@ -1809,32 +1958,79 @@ fn tabs_from_session(
     font_size: f32,
     window: &mut Window,
     cx: &mut Context<Tty7App>,
-) -> (Vec<Tab>, usize) {
-    let Some(session) = session.filter(|s| !s.tabs.is_empty()) else {
-        return (Vec::new(), 0);
+) -> (
+    Vec<Tab>,
+    usize,
+    usize,
+    Vec<SessionWorkspace>,
+    PathBuf,
+    SessionFileTreeState,
+) {
+    let Some(session) = session else {
+        return (
+            Vec::new(),
+            0,
+            0,
+            Vec::new(),
+            default_workspace_root(),
+            SessionFileTreeState::default(),
+        );
+    };
+    let active_workspace = if session.workspaces.is_empty() {
+        0
+    } else {
+        session.active_workspace.min(session.workspaces.len() - 1)
+    };
+    let workspaces = session.workspaces;
+    let (file_tree_root, file_tree_state) = workspaces
+        .get(active_workspace)
+        .map(|workspace| (workspace.root.clone(), workspace.file_tree.clone()))
+        .unwrap_or_else(|| (default_workspace_root(), SessionFileTreeState::default()));
+    let Some(workspace) = workspaces
+        .get(active_workspace)
+        .filter(|workspace| !workspace.tabs.is_empty())
+    else {
+        return (
+            Vec::new(),
+            0,
+            active_workspace,
+            workspaces,
+            file_tree_root,
+            file_tree_state,
+        );
     };
     // Ask the daemon once which panes are still alive, so leaves re-attach to
     // surviving shells instead of all spawning fresh.
     let alive = alive_panes();
-    let mut tabs: Vec<Tab> = Vec::with_capacity(session.tabs.len());
-    for st in &session.tabs {
-        let pane = session_to_pane(&st.pane, &alive, font_size, window, cx);
-        tabs.push(Tab {
-            pane,
-            name: st.name.clone(),
-            settings: None,
-        });
+    let mut tabs: Vec<Tab> = Vec::with_capacity(workspace.tabs.len());
+    for st in &workspace.tabs {
+        tabs.push(session_to_tab(st, &alive, font_size, window, cx));
     }
     // Clamp the saved active index into the rebuilt range.
-    let active = session.active.min(tabs.len() - 1);
-    (tabs, active)
+    let active = workspace.active_tab.min(tabs.len() - 1);
+    (
+        tabs,
+        active,
+        active_workspace,
+        workspaces,
+        file_tree_root,
+        file_tree_state,
+    )
+}
+
+fn default_workspace_root() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+}
+
+fn canonical_preview_path(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
 }
 
 /// Rebuild a live `Pane` tree from a saved `SessionPane`. A leaf whose saved
 /// `pane_id` is still alive in the daemon re-`attach`es (process + scrollback
 /// intact); otherwise it spawns a fresh shell in the saved cwd. `alive` is the
 /// daemon's current pane set, computed once by the caller.
-fn session_to_pane(
+pub(crate) fn session_to_pane(
     sp: &SessionPane,
     alive: &std::collections::HashSet<u64>,
     font_size: f32,
@@ -1861,7 +2057,28 @@ fn session_to_pane(
     }
 }
 
-fn new_terminal(
+pub(crate) fn session_to_tab(
+    st: &SessionTab,
+    alive: &std::collections::HashSet<u64>,
+    font_size: f32,
+    window: &mut Window,
+    cx: &mut Context<Tty7App>,
+) -> Tab {
+    let mut tab = match &st.kind {
+        SessionTabKind::Terminal { pane } => {
+            Tab::new(session_to_pane(pane, alive, font_size, window, cx))
+        }
+        SessionTabKind::Preview { path } => Tab::preview(new_preview(path.clone(), cx)),
+    };
+    tab.name = st.name.clone();
+    tab
+}
+
+fn new_preview(path: PathBuf, cx: &mut Context<Tty7App>) -> Entity<FilePreview> {
+    cx.new(|cx| FilePreview::new(path, cx))
+}
+
+pub(crate) fn new_terminal(
     font_size: f32,
     working_directory: Option<std::path::PathBuf>,
     restore_pane: Option<u64>,
@@ -1883,6 +2100,14 @@ fn new_terminal(
     cx.subscribe_in(&view, window, |app, view, _: &ChildExited, window, cx| {
         app.on_child_exited(view.clone(), window, cx);
     })
+    .detach();
+    cx.subscribe_in(
+        &view,
+        window,
+        |app, view, event: &CwdChanged, window, cx| {
+            app.on_terminal_cwd_changed(view, &event.cwd, window, cx);
+        },
+    )
     .detach();
     view
 }
