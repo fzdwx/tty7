@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-08
+
 ### Added
 
 - The "+" button now opens a shell picker: tty7 detects the shells installed
@@ -27,6 +29,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed — probed across Program Files (x64/x86/ARM), the Microsoft Store,
   scoop, dotnet tools and `PATH` — and falls back to Windows PowerShell as
   before. Set `shell` in `config.json` to override, as ever.
+
+### Fixed
+
+- Powerline prompt separators (powerlevel10k, oh-my-posh, oh-my-zsh) now render
+  pixel-perfect at any font, size and line-height: the eight solid separators
+  (sharp triangles, round caps, slants) are drawn natively as fill paths sized
+  to the exact cell instead of relying on a Nerd Font, so segments meet their
+  backgrounds cleanly with no gaps, narrow wedges or tofu. The bundled Hack font
+  is also appended to every font-fallback chain, so common prompt glyphs (➜, ❯,
+  box drawing) no longer render truncated or missing when no Nerd Font is
+  installed. (#17)
+- A URL glued directly to a full-width bracket with no space — e.g.
+  `…/pull/343（fix/… → dev）` — no longer swallows the bracket text into the
+  link. URL detection now stops at the first non-URL character (a CJK glyph,
+  full-width bracket, arrow or emoji), while interior ASCII parens
+  (Wikipedia-style URLs) are still preserved.
+- Fish, nushell, pwsh and other shells installed by Homebrew or nix now appear
+  in the "+" shell picker even when they aren't registered in `/etc/shells`
+  (which those package managers leave to the user): a curated set of well-known
+  shells is now probed on `PATH` as a catch-all, after the `/etc/shells`
+  entries. (#18)
+- Upgrading tty7 while an older daemon is still running in the background no
+  longer breaks new tabs. A stale daemon that accepts the connection but can't
+  serve the new client's request is now restarted once and retried
+  automatically; on macOS the GUI also forwards the shell it was launched with
+  to the detached daemon, so panes use the right shell instead of a stale
+  `$SHELL` inherited from LaunchServices.
 
 ## [0.5.0] - 2026-07-07
 
@@ -175,7 +204,8 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
-[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/l0ng-ai/tty7/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/l0ng-ai/tty7/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/l0ng-ai/tty7/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/l0ng-ai/tty7/compare/v0.2.0...v0.3.0
