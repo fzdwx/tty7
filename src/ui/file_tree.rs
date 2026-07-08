@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use gpui::{AnyElement, Context, MouseButton, MouseDownEvent, div, prelude::*, px};
+use gpui::{AnyElement, Context, MouseButton, MouseDownEvent, div, img, prelude::*, px};
 use gpui_component::{ActiveTheme as _, Icon, IconName};
 
 use crate::core::file_tree::{FileTree, FileTreeEntry, FileTreeEntryKind};
 use crate::ui::app::Tty7App;
+use crate::ui::file_icons::{file_icon_path, file_symlink_icon_path, folder_icon_path};
 
 const FILE_TREE_INDENT: f32 = 16.0;
 
@@ -89,10 +90,19 @@ impl Tty7App {
             .selected_path
             .as_ref()
             .is_some_and(|selected| selected == &entry.path);
-        let icon = match entry.kind {
-            FileTreeEntryKind::Directory if expanded => IconName::FolderOpen,
-            FileTreeEntryKind::Directory => IconName::Folder,
-            FileTreeEntryKind::File | FileTreeEntryKind::Symlink => IconName::File,
+        let entry_icon: AnyElement = match entry.kind {
+            FileTreeEntryKind::Directory => img(folder_icon_path(expanded))
+                .size(px(14.))
+                .flex_none()
+                .into_any_element(),
+            FileTreeEntryKind::File => img(file_icon_path(&entry.path))
+                .size(px(14.))
+                .flex_none()
+                .into_any_element(),
+            FileTreeEntryKind::Symlink => img(file_symlink_icon_path())
+                .size(px(14.))
+                .flex_none()
+                .into_any_element(),
         };
         let chevron = if entry.is_dir() {
             Some(if expanded {
@@ -141,11 +151,7 @@ impl Tty7App {
                     .text_color(cx.theme().muted_foreground)
             }))
             .when(!has_chevron, |row| row.child(div().size(px(13.))))
-            .child(
-                Icon::new(icon)
-                    .size(px(14.))
-                    .text_color(cx.theme().muted_foreground),
-            )
+            .child(entry_icon)
             .child(div().min_w_0().truncate().child(entry.name.clone()))
             .into_any_element()
     }

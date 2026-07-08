@@ -7313,6 +7313,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "portable-pty",
  "reqwest_client",
+ "rust-embed",
  "serde",
  "serde_json",
  "smallvec",

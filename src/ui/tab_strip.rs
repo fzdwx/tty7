@@ -5,8 +5,8 @@
 //! orchestration rather than chrome rendering.
 
 use gpui::{
-    App, Context, FontWeight, MouseButton, MouseDownEvent, SharedString, Window, div, prelude::*,
-    px,
+    AnyElement, App, Context, FontWeight, MouseButton, MouseDownEvent, SharedString, div, img,
+    prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -16,35 +16,16 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_fle
 use crate::core::config::Config;
 use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{Tab, Tty7App};
+use crate::ui::file_icons::file_icon_path;
 use crate::ui::hints::tab_badge_label;
 
 use label::{icon_for_title, short_title};
 
 mod chrome;
+mod drag;
 mod label;
 
-/// Drag payload for reordering tabs. Carries the source index and a label so the
-/// drag preview can show the tab being moved.
-#[derive(Clone)]
-struct DragTab {
-    index: usize,
-    label: SharedString,
-}
-
-impl Render for DragTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_3()
-            .py_1()
-            .rounded_lg()
-            .bg(cx.theme().secondary)
-            .border_1()
-            .border_color(cx.theme().border)
-            .text_sm()
-            .text_color(cx.theme().foreground)
-            .child(self.label.clone())
-    }
-}
+use drag::DragTab;
 
 impl Tty7App {
     /// The display label for a tab: the user-set name if present, otherwise the
@@ -66,16 +47,28 @@ impl Tty7App {
         }
     }
 
-    /// A small monochrome line icon for a tab: a gear for settings, otherwise
-    /// derived from the focused terminal's title (remote/VCS/default terminal).
-    fn tab_icon(&self, tab: &Tab, cx: &App) -> IconName {
+    fn tab_icon(&self, tab: &Tab, is_active: bool, cx: &mut Context<Self>) -> AnyElement {
+        let icon_color = if is_active {
+            cx.theme().foreground
+        } else {
+            cx.theme().muted_foreground
+        };
         if tab.is_settings() {
-            return IconName::Settings;
+            return Icon::new(IconName::Settings)
+                .size(px(15.))
+                .text_color(icon_color)
+                .into_any_element();
         }
-        if tab.is_preview() {
-            return IconName::File;
+        if let Some(preview) = tab.preview.as_ref() {
+            return img(file_icon_path(preview.read(cx).path.as_path()))
+                .size(px(15.))
+                .flex_none()
+                .into_any_element();
         }
-        icon_for_title(&tab.leaf_title(cx))
+        Icon::new(icon_for_title(&tab.leaf_title(cx)))
+            .size(px(15.))
+            .text_color(icon_color)
+            .into_any_element()
     }
 
     pub(crate) fn tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -100,7 +93,7 @@ impl Tty7App {
             let is_active = i == active;
             let label = self.tab_label(tab, i, cx);
             // A small leading glyph hinting the tab's context (dir / tool / settings).
-            let icon = self.tab_icon(tab, cx);
+            let icon = self.tab_icon(tab, is_active, cx);
 
             // Inline rename input for this tab, if it's the one being renamed.
             let rename_input = self
@@ -221,15 +214,7 @@ impl Tty7App {
                         this.activate(i, window, cx);
                     }),
                 )
-                // Leading context glyph: brighter (foreground) on the active tab,
-                // muted on the others — hierarchy stays monochrome.
-                .child(div().flex_shrink_0().flex().child(
-                    Icon::new(icon).size(px(15.)).text_color(if is_active {
-                        cx.theme().foreground
-                    } else {
-                        cx.theme().muted_foreground
-                    }),
-                ))
+                .child(div().flex_shrink_0().flex().child(icon))
                 // Clickable / editable label region.
                 .child(label_region)
                 // Trailing slot: normally the close affordance — always shown on

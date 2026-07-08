@@ -7,7 +7,10 @@ use crate::terminal::view::TerminalView;
 use crate::ui::app::{Tab, Tty7App, alive_panes, new_terminal, session_to_tab};
 use crate::ui::pane::Pane;
 
+mod git;
 mod render;
+
+use git::branch_label as git_branch_label;
 
 pub(crate) const WORKSPACE_RAIL_WIDTH: f32 = 72.0;
 const WORKSPACE_LABEL_MAX: usize = 8;
@@ -155,6 +158,15 @@ impl Tty7App {
                 .unwrap_or_else(|| format!("{}", index + 1))
         };
         clamp_label(&label)
+    }
+
+    fn workspace_git_branch(&self, index: usize) -> Option<String> {
+        let root = if index == self.active_workspace {
+            self.file_tree_root.as_path()
+        } else {
+            self.workspace_snapshots.get(index)?.root.as_path()
+        };
+        git_branch_label(root).map(|branch| clamp_label(&branch))
     }
 
     fn seed_cwd(&self, window: &Window, cx: &gpui::App) -> PathBuf {

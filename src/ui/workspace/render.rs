@@ -35,6 +35,7 @@ impl Tty7App {
     fn render_workspace_item(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let active = index == self.active_workspace;
         let label = self.workspace_label(index);
+        let branch = self.workspace_git_branch(index);
         let icon = if active {
             IconName::FolderOpen
         } else {
@@ -45,13 +46,13 @@ impl Tty7App {
             .id(("workspace-switch", index))
             .mx_2()
             .mb_1()
-            .h(px(48.))
+            .h(px(58.))
             .rounded_lg()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .gap_1()
+            .gap_0p5()
             .cursor_pointer()
             .text_color(if active {
                 cx.theme().foreground
@@ -72,6 +73,16 @@ impl Tty7App {
             )
             .child(Icon::new(icon).size(px(16.)))
             .child(div().max_w(px(52.)).truncate().text_xs().child(label))
+            .when_some(branch, |item, branch| {
+                item.child(
+                    div()
+                        .max_w(px(52.))
+                        .truncate()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(branch),
+                )
+            })
             .into_any_element()
     }
 

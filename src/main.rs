@@ -12,10 +12,10 @@ mod ui;
 
 use crate::core::config::Config;
 use crate::ui::app::Tty7App;
+use crate::ui::assets::Assets;
 use crate::ui::keymap;
 use gpui::*;
 use gpui_component::{ActiveTheme as _, Root, TitleBar};
-use gpui_component_assets::Assets;
 
 /// Register the bundled Hack monospace faces with gpui's text system so the
 /// default `font_family` ("Hack") renders identically on every machine, with no

@@ -83,6 +83,45 @@ fn active_non_first_terminal_does_not_steal_workspace_root() {
     std::fs::remove_dir_all(other_root).ok();
 }
 
+#[test]
+fn git_branch_label_reads_branch_from_git_head() {
+    let root = temp_workspace("git-branch");
+    let git_dir = root.join(".git");
+    std::fs::create_dir_all(&git_dir).unwrap();
+    std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/workspace\n").unwrap();
+
+    assert_eq!(
+        git_branch_label(&root),
+        Some("feature/workspace".to_string())
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn git_branch_label_follows_gitdir_file() {
+    let root = temp_workspace("gitfile");
+    let storage = root.with_extension("gitdir");
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::write(
+        root.join(".git"),
+        format!("gitdir: {}\n", storage.display()),
+    )
+    .unwrap();
+    std::fs::write(storage.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    assert_eq!(git_branch_label(&root), Some("main".to_string()));
+    std::fs::remove_dir_all(root).ok();
+    std::fs::remove_dir_all(storage).ok();
+}
+
+#[test]
+fn git_branch_label_is_none_outside_git_repository() {
+    let root = temp_workspace("no-git");
+
+    assert_eq!(git_branch_label(&root), None);
+    std::fs::remove_dir_all(root).ok();
+}
+
 fn temp_project(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "tty7-workspace-cwd-{label}-{}-{}",
@@ -91,6 +130,16 @@ fn temp_project(label: &str) -> PathBuf {
     ));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+    root
+}
+
+fn temp_workspace(label: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "tty7-workspace-{label}-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
     root
 }
 

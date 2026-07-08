@@ -80,7 +80,8 @@ Rules:
 - Interaction: mouse down stops titlebar propagation.
 
 ### Side Rail Item
-- Structure: fixed-width row or tile with icon and short label.
+- Structure: fixed-width row or tile with icon, short label, and optional muted
+  Git branch caption when the workspace root is a repository.
 - States: active uses `secondary` + foreground; inactive uses muted text and
   muted hover.
 - Interaction: click switches context; plus tile creates a new context.
@@ -89,8 +90,11 @@ Rules:
 
 ### File Tree Row
 - Structure: rows begin directly at the top of the file tree panel; each row
-  has a chevron slot, file/folder icon, and truncating name. The workspace
-  switcher owns root identity, so the file tree does not repeat a root header.
+  has a chevron slot, icon, and truncating name. Directories, files, and
+  symlinks use bundled Pierre VS Code icon theme SVGs, resolved through the
+  Complete tier file-name and extension mapping with generic file fallbacks. The
+  workspace switcher owns root identity, so the file tree does not repeat a root
+  header.
 - States: selected uses `muted` + foreground; hover uses `muted`.
 - Interaction: directories toggle expansion, files open or focus preview tabs.
 
