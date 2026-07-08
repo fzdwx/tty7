@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Axis, Context, Entity, KeyDownEvent, PromptLevel, Subscription, Window, div, prelude::*,
-    px,
+    App, Axis, Context, Entity, KeyDownEvent, PromptLevel, ScrollHandle, Subscription, Window, div,
+    prelude::*, px,
 };
 use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
@@ -40,6 +40,11 @@ pub(crate) const LINE_HEIGHT_STEP: f32 = 0.05;
 /// Cap on the recently-closed-tab stack, bounding memory and the JSON we'd
 /// otherwise keep growing without limit.
 const MAX_CLOSED_TABS: usize = 20;
+const TITLE_BAR_ACTION_RAIL_WIDTH: f32 = 34.0;
+const TITLE_BAR_TAB_END_GAP: f32 = 18.0;
+const TITLE_BAR_LEFT_PADDING: f32 = 12.0;
+const TITLE_BAR_WINDOW_CONTROLS_WIDTH: f32 = 102.0;
+const TITLE_BAR_WIDTH_FUDGE: f32 = 4.0;
 
 pub struct Tab {
     /// The tab's split-pane tree (one or more terminals). For a settings tab
@@ -109,6 +114,7 @@ pub struct Tty7App {
     /// The open tabs; each owns a split-pane tree and an optional name.
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
+    pub(crate) tab_scroll_handle: ScrollHandle,
     pub(crate) active_workspace: usize,
     pub(crate) workspace_snapshots: Vec<SessionWorkspace>,
     pub(crate) file_tree_root: PathBuf,
@@ -213,6 +219,7 @@ impl Tty7App {
         let app = Self {
             tabs,
             active,
+            tab_scroll_handle: ScrollHandle::new(),
             active_workspace,
             workspace_snapshots,
             file_tree_root,
@@ -1776,7 +1783,15 @@ impl Tty7App {
 
 impl Render for Tty7App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let strip = self.tab_strip(window, cx);
+        let strip = self.tab_strip(cx);
+        let tab_viewport_width = (window.viewport_size().width
+            - px(crate::ui::workspace::WORKSPACE_RAIL_WIDTH
+                + TITLE_BAR_LEFT_PADDING
+                + TITLE_BAR_WINDOW_CONTROLS_WIDTH
+                + TITLE_BAR_ACTION_RAIL_WIDTH
+                + TITLE_BAR_TAB_END_GAP
+                + TITLE_BAR_WIDTH_FUDGE))
+        .max(px(0.));
         // Render the active tab's pane tree; show focus rings only when split.
         let body = match self.tabs.get(self.active) {
             // Zero tabs: the window's own face — the home page (see `ui::home`).
@@ -1882,16 +1897,35 @@ impl Render for Tty7App {
                     .flex_col()
                     .child(
                         TitleBar::new()
-                            // Taller than the stock 34px bar so the tabs read substantial
-                            // and roomy instead of cramped. `.h(..)` lands
-                            // in the component's `refine_style`, which is applied after its
-                            // own `.h(TITLE_BAR_HEIGHT)`, so this override wins.
-                            .h(px(40.))
                             .bg(cx.theme().transparent)
                             .border_color(cx.theme().transparent)
-                            // The tab strip anchors left; the title bar keeps its right
-                            // edge clear (before the traffic lights' mirror gap on macOS).
-                            .child(strip),
+                            .child(
+                                div()
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(tab_viewport_width)
+                                            .max_w(tab_viewport_width)
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .child(strip),
+                                    )
+                                    .child(div().w(px(TITLE_BAR_TAB_END_GAP)).flex_shrink_0())
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(px(TITLE_BAR_ACTION_RAIL_WIDTH))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_end()
+                                            .child(self.file_tree_toggle_tile(cx)),
+                                    ),
+                            ),
                     )
                     .child({
                         let main = div()

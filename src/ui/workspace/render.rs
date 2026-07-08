@@ -2,8 +2,7 @@ use gpui::{AnyElement, Context, MouseButton, MouseDownEvent, div, prelude::*, px
 use gpui_component::{ActiveTheme as _, Icon, IconName};
 
 use crate::ui::app::Tty7App;
-
-const WORKSPACE_RAIL_WIDTH: f32 = 72.0;
+use crate::ui::workspace::WORKSPACE_RAIL_WIDTH;
 
 impl Tty7App {
     pub(crate) fn render_workspace_switcher(&self, cx: &mut Context<Self>) -> AnyElement {

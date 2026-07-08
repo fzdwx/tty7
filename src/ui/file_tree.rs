@@ -10,11 +10,6 @@ const FILE_TREE_INDENT: f32 = 16.0;
 
 impl Tty7App {
     pub(crate) fn render_file_tree(&self, cx: &mut Context<Self>) -> AnyElement {
-        let root_name = self
-            .file_tree_root
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.file_tree_root.display().to_string());
         let mut rows = Vec::new();
         match FileTree::new(&self.file_tree_root) {
             Ok(tree) => self.collect_file_tree_rows(&tree, &self.file_tree_root, 0, &mut rows, cx),
@@ -38,19 +33,6 @@ impl Tty7App {
             .border_l_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
-            .child(
-                div()
-                    .h(px(36.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(cx.theme().foreground)
-                    .child(root_name),
-            )
             .child(
                 div()
                     .id("file-tree-rows")

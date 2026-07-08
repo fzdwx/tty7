@@ -15,55 +15,10 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
 use crate::ui::app::{Tab, Tty7App};
 use crate::ui::hints::tab_badge_label;
 
-/// Derive a short tab label from a terminal's raw title.
-///
-/// Shells emit OSC titles like `user@host:~/projects/app`; we show just the
-/// meaningful tail — the current directory's name (or the running command). We
-/// strip the `user@host:` prefix, then take the last path component, keeping
-/// `~` for the home directory.
-fn short_title(raw: &str) -> String {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return String::new();
-    }
-    // Drop a leading `user@host:` if present (only when it precedes a path).
-    let after_host = match raw.split_once(':') {
-        Some((head, tail)) if head.contains('@') => tail,
-        _ => raw,
-    };
-    let path = after_host.trim();
-    // Home directory shows as `~`; otherwise use the last path segment.
-    let name = if path == "~" {
-        "~"
-    } else {
-        path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path)
-    };
-    let mut name = name.to_string();
-    // Final safety clamp for unusually long names.
-    if name.chars().count() > 24 {
-        name = format!("{}…", name.chars().take(24).collect::<String>());
-    }
-    name
-}
+use label::{icon_for_title, short_title};
 
-/// Pick a small monochrome line icon for a tab from its terminal title. A clean
-/// terminal glyph is the default; a few high-confidence contexts (remote shell,
-/// version control) get a dedicated icon. Kept deliberately minimal so the strip
-/// reads modern rather than busy.
-fn icon_for_title(raw: &str) -> IconName {
-    let label = short_title(raw);
-    // First whitespace token, lowercased — matches a bare command like `ssh host`.
-    let cmd = label
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match cmd.as_str() {
-        "ssh" | "mosh" => IconName::Globe,
-        "git" | "lazygit" | "gitui" => IconName::Github,
-        _ => IconName::SquareTerminal,
-    }
-}
+mod chrome;
+mod label;
 
 /// Drag payload for reordering tabs. Carries the source index and a label so the
 /// drag preview can show the tab being moved.
@@ -120,30 +75,23 @@ impl Tty7App {
         icon_for_title(&tab.leaf_title(cx))
     }
 
-    pub(crate) fn tab_strip(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    pub(crate) fn tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let active = self.active;
         // While the bare ⌘/Ctrl hold is armed (see `ui::hints`), each of the
         // first nine chips swaps its close affordance for a ⌘N badge — same
         // slot, so nothing shifts when the hints appear.
         let show_badges = self.mod_hint_badges;
-        // The titlebar lays out on its main axis by content width, so the strip
-        // never inherits a window-bounded width to shrink within — `flex_shrink`
-        // on the chips would never fire. Derive an explicit cap from the live
-        // viewport instead: total width minus the traffic-light pad (80), the
-        // strip's own left margin (8), and a small right buffer. Capped this way,
-        // a crowded strip becomes a bounded flex container and the chips shrink.
-        let avail = (window.viewport_size().width - px(100.)).max(px(120.));
         let mut strip = h_flex()
+            .id("tab-strip")
             .items_center()
             .gap_1p5()
             .ml_2()
+            .mt(px(2.))
+            .flex_1()
+            .flex_basis(px(0.))
             .min_w_0()
-            .max_w(avail)
-            .overflow_hidden();
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll_handle);
 
         for (i, tab) in self.tabs.iter().enumerate() {
             let is_active = i == active;
@@ -339,86 +287,6 @@ impl Tty7App {
                     this.new_tab(window, cx);
                 }),
             );
-
         strip
-    }
-
-    /// A minimal clickable icon tile sized to sit in the title bar's rhythm:
-    /// chip-height (30px) box, chip-sized (15px) glyph, quiet hover. We hand-roll
-    /// it because gpui-component's Button locks its glyph to 0.75× the box, so it
-    /// can't hit a 30px target with a 15px glyph — Button's xsmall would float a
-    /// 20px square beside the 30px chips. `occlude()` makes the tile a `BlockMouse`
-    /// hitbox — like the chips — so on Windows the click isn't swallowed by the
-    /// TitleBar's `HTCAPTION` drag area; mouse-down + stop_propagation also keeps
-    /// the click off the TitleBar's zoom-on-double-click handler. Shared by the
-    /// "+" new-tab button and the split-pane buttons.
-    fn title_bar_tile<F>(
-        &self,
-        id: &'static str,
-        icon: IconName,
-        cx: &mut Context<Self>,
-        on_click: F,
-    ) -> impl IntoElement + use<F>
-    where
-        F: Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    {
-        div()
-            .id(id)
-            .occlude()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(30.))
-            .rounded_lg()
-            .text_color(cx.theme().muted_foreground)
-            .hover(|s| s.bg(cx.theme().muted))
-            .child(Icon::new(icon).size(px(15.)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    on_click(this, window, cx);
-                }),
-            )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn short_title_strips_user_host_and_keeps_last_segment() {
-        assert_eq!(short_title("user@host:~/projects/app"), "app");
-        assert_eq!(short_title("/usr/local/bin"), "bin");
-        assert_eq!(short_title("plain"), "plain");
-    }
-
-    #[test]
-    fn short_title_keeps_home_tilde_and_handles_trailing_slash() {
-        assert_eq!(short_title("user@host:~"), "~");
-        assert_eq!(short_title("~"), "~");
-        assert_eq!(short_title("a/b/c/"), "c");
-    }
-
-    #[test]
-    fn short_title_blank_input_is_empty_and_long_names_are_clamped() {
-        assert_eq!(short_title("   "), "");
-        let long = "a".repeat(40);
-        let out = short_title(&long);
-        // Clamp is 24 chars plus a single ellipsis.
-        assert_eq!(out.chars().count(), 25);
-        assert!(out.ends_with('…'));
-    }
-
-    #[test]
-    fn icon_for_title_maps_known_commands_else_terminal() {
-        assert!(matches!(icon_for_title("ssh box"), IconName::Globe));
-        assert!(matches!(icon_for_title("git status"), IconName::Github));
-        assert!(matches!(
-            icon_for_title("vim file"),
-            IconName::SquareTerminal
-        ));
     }
 }

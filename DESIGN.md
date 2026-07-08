@@ -58,7 +58,7 @@ Spacing follows GPUI's 4px-based helpers.
 | `h(px(26.))` | 26px | Dense file/workspace rows |
 | `h(px(30.))` | 30px | Title bar icon tiles and tabs |
 | `h(px(36.))` | 36px | Side panel headers |
-| `h(px(40.))` | 40px | Title bar |
+| `h(px(34.))` | 34px | Title bar and native window controls |
 
 Rules:
 - Fixed-format UI controls get stable widths/heights.
@@ -71,7 +71,8 @@ Rules:
 - Structure: icon, truncating label or rename input, close/hint slot.
 - States: active uses `secondary` + foreground; inactive uses muted text and
   muted hover; close affordance is revealed on hover.
-- Interaction: click activates, double-click renames, drag reorders.
+- Interaction: click activates, double-click renames, drag reorders; crowded tab
+  strips scroll horizontally with wheel/Shift-wheel gestures.
 
 ### Icon Tile
 - Structure: 30px square, 15px icon, rounded 8px.
@@ -87,9 +88,17 @@ Rules:
   the file tree on the nearest project root.
 
 ### File Tree Row
-- Structure: chevron slot, file/folder icon, truncating name.
+- Structure: rows begin directly at the top of the file tree panel; each row
+  has a chevron slot, file/folder icon, and truncating name. The workspace
+  switcher owns root identity, so the file tree does not repeat a root header.
 - States: selected uses `muted` + foreground; hover uses `muted`.
 - Interaction: directories toggle expansion, files open or focus preview tabs.
+
+### Header Sidebar Toggle
+- Structure: full-height 34px title-bar control beside the native window
+  controls, using panel-right open / close glyphs for the file tree.
+- States: muted default, muted-fill hover, icon changes with visibility.
+- Interaction: click toggles the file tree and persists the workspace session.
 
 ### Preview Tab
 - Structure: scrollable body; file identity stays in the tab strip and file tree.

@@ -9,6 +9,7 @@ use crate::ui::pane::Pane;
 
 mod render;
 
+pub(crate) const WORKSPACE_RAIL_WIDTH: f32 = 72.0;
 const WORKSPACE_LABEL_MAX: usize = 8;
 
 impl Tty7App {
