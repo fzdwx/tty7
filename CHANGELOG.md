@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-08
+
 ### Changed
 
 - Context menus and the "+" dropdown now highlight the hovered row with the
@@ -16,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fill.
 
 ### Fixed
+
+- On Windows, a pane no longer hangs open when its shell exits on its own.
+  Typing `exit`, pressing Ctrl-D, or a shell crash ends the shell, but ConPTY's
+  output pipe never reports EOF on a natural exit — and tty7 detected a shell's
+  death solely from that EOF — so the pane was left wedged open, dead but
+  visible. A Windows-only monitor now waits on the shell process directly and
+  reports the exit through the same path a Unix `read()` EOF drives, so the pane
+  closes as it does everywhere else. Closing a tab from the UI was already
+  unaffected; macOS and Linux are unchanged. (#30)
 
 - Nerd Font prompt icons no longer render sliced off on the right. A non-Mono
   Nerd Font (and the proportional `➜`/`❯` the OS cascade hands back when nothing
@@ -251,7 +262,9 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
-[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/l0ng-ai/tty7/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/l0ng-ai/tty7/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/l0ng-ai/tty7/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/l0ng-ai/tty7/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/l0ng-ai/tty7/compare/v0.3.0...v0.4.0
