@@ -624,6 +624,13 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.link_url = on);
     }
 
+    /// Toggle the startup update check (Settings → About). Takes effect on the
+    /// next launch — this only persists the preference; it doesn't run or cancel
+    /// an in-flight check.
+    pub(crate) fn set_check_for_updates(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.check_for_updates = on);
+    }
+
     pub(crate) fn set_cursor_blink(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.cursor_blink = on);
         // Turning blink off mid-cycle could leave the cursor in its hidden phase;
@@ -1756,6 +1763,14 @@ impl Tty7App {
         if let Err(e) = std::process::Command::new(opener).arg(&path).spawn() {
             log::warn!("failed to open {}: {e}", path.display());
         }
+    }
+
+    /// Open the GitHub Releases page in the browser — the "Download" action of
+    /// the Settings → About update prompt. Deliberately hand-off, not
+    /// self-update: the newest build is one click away on the web. Delegates to
+    /// `core::update` so the settings button and the update modal share it.
+    pub(crate) fn open_releases_page(&self) {
+        crate::core::update::open_releases_page();
     }
 }
 

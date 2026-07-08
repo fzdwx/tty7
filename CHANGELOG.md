@@ -7,8 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-07
+
 ### Added
 
+- Windows releases now ship an Inno Setup installer
+  (`tty7-<version>-windows-x86_64-setup.exe`) alongside the portable zip. It
+  installs per-user by default (no admin prompt, with an all-users option),
+  adds a Start Menu shortcut and an "Apps" uninstall entry, and offers an
+  optional desktop icon. Still unsigned, so SmartScreen warns on first launch.
+- Startup update check: tty7 asks GitHub once, in the background, whether a
+  newer release has shipped. If so, it pops a one-time "Update available" dialog
+  (once per version — remembered in `update.json`, so it never nags twice for
+  the same release) and keeps a persistent "Download" prompt in Settings →
+  About. Both open the Releases page; tty7 never downloads or updates itself —
+  you still install by hand. Turn the check off with `check_for_updates` in
+  `config.json` or the "Check for updates on launch" toggle in About. A failed
+  or offline check is silent.
 - ⌘K (Ctrl+K on Windows/Linux) clears the screen and scrollback — the same
   "Clear" the right-click menu already offered, now on the keyboard shortcut
   Terminal.app, iTerm2, and Ghostty users expect. Also available from the
@@ -17,12 +32,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   View menu and command palette), matching the Ghostty/iTerm2 default. It
   previously toggled pane maximize — which silently did nothing in a
   single-pane tab, so the chord felt dead.
+- The right-click menu now shows each item's keyboard shortcut. Copy, Paste,
+  Select All, and Find previously showed nothing (they're dispatched inline,
+  with no bound key for the menu to read a hint from) while the other items
+  did, so the menu looked half-labelled. ⌘A / ⌘F stay hint-less on
+  Windows/Linux, where those chords keep their readline meaning.
 
 ### Changed
 
 - Maximize / restore pane moved from ⌘⏎ to ⌘⇧⏎ (Ghostty's `toggle_split_zoom`
   default), making room for fullscreen on the bare chord. An existing
   `ToggleMaximizePane` override in `keybindings` still wins.
+
+### Fixed
+
+- Windows: launching tty7 no longer opens a stray console window behind the
+  app. Release builds are now linked with the `windows` subsystem; debug
+  builds keep the console so `println!` output stays visible. (#10)
+- The right-click "Select All" now matches the ⌘A shortcut: at the prompt it
+  selects the edited command line, otherwise the whole terminal buffer. It
+  previously always selected the whole buffer, so click and keystroke behaved
+  differently at the prompt.
+- Ctrl+R reverse-search now accepts plain ASCII keystrokes. The query only
+  took text from the IME commit path, so a non-CJK input source on macOS — and
+  all typing on Linux — was swallowed: the search box opened but ate every key.
+  Reported on V2EX.
 
 ## [0.3.0] - 2026-07-07
 
@@ -120,7 +154,10 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
-[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/l0ng-ai/tty7/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/l0ng-ai/tty7/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/l0ng-ai/tty7/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/l0ng-ai/tty7/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/l0ng-ai/tty7/releases/tag/v0.1.0
 [gpui]: https://github.com/zed-industries/zed

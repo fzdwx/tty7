@@ -1,6 +1,6 @@
 [package]
 name = "tty7"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2024"
 description = "A terminal built on Zed's gpui that never loses your session — daemon-backed, shell-aware"
 repository = "https://github.com/l0ng-ai/tty7"
@@ -25,6 +25,15 @@ smol.workspace = true
 smallvec.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+
+# HTTP client for the startup update check (`core::update`): one GET to the
+# GitHub releases API to see if a newer version has shipped. `reqwest_client`
+# wraps Zed's `zed-reqwest` fork behind gpui's `http_client` trait (re-exported
+# as `gpui::http_client`) and manages its own tokio runtime. That reqwest+rustls
+# stack is *already* compiled into the tree via `gpui-component-assets`, so this
+# pins no new native code — it only exposes what we're already building. Pinned
+# to gpui's rev so the shared `http_client`/`zed-reqwest` versions stay aligned.
+reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
 
 # Zed's fork of alacritty_terminal — same rev Zed pins. Used by the *client*
 # (`terminal::remote`) for the VT parser + grid (`Term`/`ansi::Processor`) that

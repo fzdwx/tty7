@@ -68,6 +68,11 @@ pub struct Config {
     /// finishes.
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
+    /// On startup, ask GitHub whether a newer release has shipped and, if so,
+    /// surface a "download" prompt in Settings → About. Never downloads or
+    /// self-updates — it only links to the Releases page. On by default; set to
+    /// `false` to skip the network call entirely (offline / privacy).
+    pub check_for_updates: bool,
 
     // ── Appearance ──────────────────────────────────────────────────────────
     /// The shape drawn for the terminal cursor.
@@ -234,6 +239,9 @@ impl Default for Config {
             scrollback_limit: 10_000,
             new_tab_position: NewTabPosition::AfterCurrent,
             notify_on_command_finish: NotifyMode::Unfocused,
+            // Opt-out, not opt-in: a stale terminal that never tells you it's
+            // outdated is the status quo we're fixing. One cheap GET at startup.
+            check_for_updates: true,
             cursor_style: CursorStyle::Block,
             // Input/mouse defaults preserve today's behavior: GPUI already hides
             // the pointer while typing (its `CursorHideMode` default), so this

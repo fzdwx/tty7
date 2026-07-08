@@ -1265,6 +1265,13 @@ impl Tty7App {
         let theme = cx.theme();
         let (foreground, muted_fg) = (theme.foreground, theme.muted_foreground);
 
+        // Startup update check (see `core::update`): a newer release, if one was
+        // found, plus the toggle that controls whether we look at all.
+        let update = cx
+            .try_global::<crate::core::update::UpdateStatus>()
+            .and_then(|s| s.available.clone());
+        let check_for_updates = cx.global::<Config>().check_for_updates;
+
         let logo = Arc::new(Image::from_bytes(
             ImageFormat::Png,
             include_bytes!("../../assets/logo@256.png").to_vec(),
@@ -1311,6 +1318,65 @@ impl Tty7App {
                             .text_xs()
                             .text_color(muted_fg)
                             .child("GPU-rendered · daemon-backed · shell-aware"),
+                    ),
+            )
+            // Updates: the startup check drops a newer version here if it found
+            // one. We never self-update — "Download" just opens the Releases
+            // page; the toggle turns the check off (see `core::update`).
+            .child(
+                v_flex()
+                    .mt_6()
+                    .gap_2()
+                    .child(self.section_rule(cx))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(foreground)
+                            .child("Updates"),
+                    )
+                    .when_some(update, |this, upd| {
+                        this.child(
+                            h_flex()
+                                .gap_3()
+                                .items_center()
+                                .child(div().text_sm().text_color(foreground).child(
+                                    format!("Version {} is available.", upd.version),
+                                ))
+                                .child(
+                                    // Match the sibling "Restart Background
+                                    // Service…" button (default style, not the
+                                    // dark `.primary()` fill) so About reads as
+                                    // one panel.
+                                    Button::new("download-update")
+                                        .label("Download")
+                                        .small()
+                                        .on_click(cx.listener(|this, _, _w, _cx| {
+                                            this.open_releases_page()
+                                        })),
+                                ),
+                        )
+                    })
+                    .child(div().text_sm().text_color(muted_fg).child(
+                        "Check GitHub for a newer release on launch and show a download link here. tty7 never updates itself; the button opens the Releases page.",
+                    ))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Switch::new("check-updates")
+                                    .checked(check_for_updates)
+                                    .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                                        this.set_check_for_updates(*on, cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(foreground)
+                                    .child("Check for updates on launch"),
+                            ),
                     ),
             )
             // Manage that daemon. A fresh process is the only way to pick up a

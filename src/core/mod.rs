@@ -14,3 +14,4 @@ pub mod file_tree;
 pub mod osc;
 pub mod session;
 pub mod threads;
+pub mod update;

@@ -4,7 +4,7 @@
 
 ### tty7
 
-**A fast, GPU-rendered terminal in pure Rust.**
+**A GPU-rendered terminal in pure Rust.**
 
 <sub>GPU rendering on Zed's gpui · VT core from Alacritty</sub>
 
@@ -13,6 +13,7 @@
 [![CI](https://github.com/l0ng-ai/tty7/actions/workflows/ci.yml/badge.svg)](https://github.com/l0ng-ai/tty7/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/github/v/tag/l0ng-ai/tty7?label=version&color=ff8a5c)](https://github.com/l0ng-ai/tty7/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/s3dethqz2V)
 
 [**Install**](#-install) · [**Benchmarks**](#-benchmarks) · [**Shortcuts**](#️-shortcuts) · [**Contributing**](#-contributing)
 
@@ -39,7 +40,7 @@ configuration needed.
 - ⌨️ **Prompt with completions** — inline completion, syntax highlighting,
   history, and in-terminal search. Type
   `git commit --`, `kubectl`, or `npm` and every flag and subcommand shows up
-  with its description — rich signatures for ~100 common commands, generated
+  with its description — signatures for ~100 common commands, generated
   from Fig's spec corpus.
 - 🧠 **Shell-aware, zero config** — new tabs and splits open in the current
   working directory, and path completion always follows where you are. zsh,
@@ -89,11 +90,13 @@ run it yourself.
 
 ## 🚀 Install
 
-Grab the build for your platform from [**Releases**](https://github.com/l0ng-ai/tty7/releases):
+Download the build for your platform from [**Releases**](https://github.com/l0ng-ai/tty7/releases):
 
 - **macOS** — `tty7-<version>-macos-arm64.dmg` (Apple Silicon) or `…-x86_64.dmg`
   (Intel); open it and drag `tty7.app` into Applications.
-- **Windows** — `…-windows-x86_64.zip`; unzip and run `tty7.exe`.
+- **Windows** — `…-windows-x86_64-setup.exe` (installer: Start Menu shortcut +
+  uninstall entry), or `…-windows-x86_64.zip` (portable: unzip and run
+  `tty7.exe`).
 - **Linux** — `…-linux-x86_64.tar.gz`; extract and run `./tty7` (needs the usual
   x11/wayland runtime libraries).
 
@@ -126,8 +129,8 @@ The full list — and any overrides — lives in **Settings → Keybindings**.
 
 ## 🤝 Contributing
 
-Bug reports and PRs are welcome. Security issues go through
-[SECURITY.md](SECURITY.md); notable changes land in the
+Bug reports and PRs are welcome. For questions and ideas, join the
+[Discord](https://discord.gg/s3dethqz2V). Notable changes land in the
 [CHANGELOG](CHANGELOG.md).
 
 ## 📝 License
@@ -140,6 +143,6 @@ Bug reports and PRs are welcome. Security issues go through
 
 <img src="assets/app-icon.svg" alt="" width="28" height="28" />
 
-<sub><b>tty7</b> — a fast, GPU-rendered terminal in pure Rust.</sub>
+<sub><b>tty7</b> — a GPU-rendered terminal in pure Rust.</sub>
 
 </div>

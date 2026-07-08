@@ -65,7 +65,10 @@ impl ReverseSearch {
         }
     }
 
-    /// Append typed text (arriving via the IME path) to the query and re-search.
+    /// Append typed text to the query and re-search. Text arrives either via the
+    /// IME path (`replace_text_in_range` → the view's `input_text`) or, for a plain
+    /// ASCII input source, as a direct `key_char` the view forwards from
+    /// `handle_reverse_search_key`.
     pub(super) fn push_query(&mut self, text: &str, history: &[String]) {
         self.query.push_str(text);
         self.update(history, false);
