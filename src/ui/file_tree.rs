@@ -16,6 +16,16 @@ use rows as file_tree_rows;
 pub(crate) use cache::FileTreeCache;
 
 impl Tty7App {
+    pub(crate) fn refresh_file_tree(&mut self, cx: &mut Context<Self>) {
+        log::debug!(
+            target: "tty7::file_tree",
+            "refresh file tree root={}",
+            self.file_tree_root.display()
+        );
+        self.file_tree_cache.clear();
+        cx.notify();
+    }
+
     pub(crate) fn render_file_tree(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let started = Instant::now();
         let root = self.file_tree_root.clone();

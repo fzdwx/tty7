@@ -39,6 +39,7 @@ pub enum CommandKind {
     ToggleFullscreen,
     ClearTerminal,
     FindInTerminal,
+    RefreshFileTree,
     ReopenClosedTab,
     OpenSettings,
     RestartDaemon,
@@ -71,7 +72,9 @@ impl CommandKind {
             ReopenClosedTab => "ReopenClosedTab",
             OpenSettings => "OpenSettings",
             RestartDaemon => "RestartDaemon",
-            FindInTerminal | OpenThemePicker | SetTheme(_) | ActivateTab(_) => return None,
+            FindInTerminal | RefreshFileTree | OpenThemePicker | SetTheme(_) | ActivateTab(_) => {
+                return None;
+            }
         })
     }
 }
@@ -112,6 +115,7 @@ impl Command {
             Command::new("Toggle Fullscreen", ToggleFullscreen),
             Command::new("Clear", ClearTerminal),
             Command::new("Find in Terminal…", FindInTerminal),
+            Command::new("Refresh File Tree", RefreshFileTree),
             Command::new("Reopen Closed Tab", ReopenClosedTab),
             Command::new("Change Theme…", OpenThemePicker),
             Command::new("Open Settings", OpenSettings),

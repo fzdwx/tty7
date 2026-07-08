@@ -32,6 +32,19 @@ impl FileTreeCache {
         self.children.clear();
     }
 
+    pub(crate) fn clear(&mut self) {
+        log::debug!(
+            target: "tty7::file_tree",
+            "clear file tree cache root={} cached_dirs={}",
+            self.root
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string()),
+            self.children.len()
+        );
+        self.children.clear();
+    }
+
     pub(crate) fn children(&mut self, tree: &FileTree, dir: &Path) -> CachedChildren {
         let key = dir.to_path_buf();
         if let Some(cached) = self.children.get(&key) {
@@ -123,6 +136,23 @@ mod tests {
 
         assert_eq!(names(&first), vec!["one.txt"]);
         assert_eq!(names(&second), vec!["one.txt"]);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn clear_drops_cached_directory_entries_without_changing_root() {
+        let root = temp_tree("cache-clear");
+        std::fs::write(root.join("one.txt"), "").unwrap();
+        let tree = FileTree::new(&root).unwrap();
+        let mut cache = FileTreeCache::default();
+
+        cache.reset_to_root(&root);
+        cache.children(&tree, &root).unwrap();
+        cache.clear();
+
+        assert_eq!(cache.root.as_deref(), Some(root.as_path()));
+        assert!(cache.children.is_empty());
 
         std::fs::remove_dir_all(root).ok();
     }

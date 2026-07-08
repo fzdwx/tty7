@@ -44,6 +44,25 @@ fn list_children_is_lazy_and_only_reads_the_requested_directory() {
 }
 
 #[test]
+fn list_children_omits_default_ignored_directories() {
+    let root = temp_tree("default-ignore");
+    mkdir(&root, ".git");
+    mkdir(&root, "node_modules");
+    mkdir(&root, "target");
+    mkdir(&root, "dist");
+    mkdir(&root, "src");
+    touch(&root, ".env");
+
+    let tree = FileTree::new(&root).unwrap();
+    let entries = tree.list_children(&root).unwrap();
+    let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+
+    assert_eq!(names, ["src", ".env"]);
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn list_children_rejects_paths_outside_the_workspace_root() {
     let root = temp_tree("root");
     let outside = temp_tree("outside");

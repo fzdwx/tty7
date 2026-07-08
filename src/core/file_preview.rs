@@ -12,6 +12,7 @@ pub struct FilePreviewDocument {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilePreviewBody {
     Text { text: String, truncated: bool },
+    Markdown { source: String, truncated: bool },
     Image { format: ImagePreviewFormat },
     Binary,
     Error(String),
@@ -36,7 +37,10 @@ pub fn load(path: impl AsRef<Path>) -> FilePreviewDocument {
 fn preview_document_path(requested_path: &Path, body: &FilePreviewBody) -> PathBuf {
     match body {
         FilePreviewBody::Error(_) => requested_path.to_path_buf(),
-        FilePreviewBody::Text { .. } | FilePreviewBody::Image { .. } | FilePreviewBody::Binary => {
+        FilePreviewBody::Text { .. }
+        | FilePreviewBody::Markdown { .. }
+        | FilePreviewBody::Image { .. }
+        | FilePreviewBody::Binary => {
             std::fs::canonicalize(requested_path).unwrap_or_else(|_| requested_path.to_path_buf())
         }
     }
@@ -61,15 +65,19 @@ fn load_body(path: &Path) -> FilePreviewBody {
     if truncated {
         bytes.truncate(MAX_PREVIEW_BYTES);
     }
-    decode_bytes(bytes, truncated)
+    decode_bytes(bytes, truncated, markdown_preview_path(path))
 }
 
-fn decode_bytes(bytes: Vec<u8>, truncated: bool) -> FilePreviewBody {
+fn decode_bytes(bytes: Vec<u8>, truncated: bool, markdown: bool) -> FilePreviewBody {
     if bytes.contains(&0) {
         return FilePreviewBody::Binary;
     }
 
     match String::from_utf8(bytes) {
+        Ok(text) if markdown => FilePreviewBody::Markdown {
+            source: text,
+            truncated,
+        },
         Ok(text) => FilePreviewBody::Text { text, truncated },
         Err(_) => FilePreviewBody::Binary,
     }
@@ -87,6 +95,16 @@ fn image_preview_format(path: &Path) -> Option<ImagePreviewFormat> {
     }
 }
 
+fn markdown_preview_path(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "md" | "markdown" | "mdown" | "mkd" | "mdx"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +120,39 @@ mod tests {
             FilePreviewBody::Text {
                 text: "hello\nworld\n".into(),
                 truncated: false,
+            }
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn load_recognizes_markdown_files() {
+        let path = temp_file_with_extension("markdown", "md", b"# Title\n\nBody\n");
+
+        let preview = load(&path);
+
+        assert_eq!(
+            preview.body,
+            FilePreviewBody::Markdown {
+                source: "# Title\n\nBody\n".into(),
+                truncated: false,
+            }
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn load_truncates_large_markdown_files() {
+        let bytes = vec![b'a'; MAX_PREVIEW_BYTES + 10];
+        let path = temp_file_with_extension("large-markdown", "markdown", &bytes);
+
+        let preview = load(&path);
+
+        assert_eq!(
+            preview.body,
+            FilePreviewBody::Markdown {
+                source: "a".repeat(MAX_PREVIEW_BYTES),
+                truncated: true,
             }
         );
         std::fs::remove_file(path).ok();

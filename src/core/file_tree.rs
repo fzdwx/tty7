@@ -76,11 +76,15 @@ impl FileTree {
                 path: dir.clone(),
                 source,
             })?;
+            let name = entry.file_name().to_string_lossy().into_owned();
             let path = entry.path();
             let file_type = entry.file_type().map_err(|source| FileTreeError::Io {
                 path: path.clone(),
                 source,
             })?;
+            if file_type.is_dir() && is_default_ignored_dir(&name) {
+                continue;
+            }
             let kind = if file_type.is_dir() {
                 FileTreeEntryKind::Directory
             } else if file_type.is_symlink() {
@@ -88,11 +92,7 @@ impl FileTree {
             } else {
                 FileTreeEntryKind::File
             };
-            entries.push(FileTreeEntry {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                path,
-                kind,
-            });
+            entries.push(FileTreeEntry { name, path, kind });
         }
         entries.sort_by(compare_entries);
         Ok(entries)
@@ -133,6 +133,25 @@ fn compare_entries(a: &FileTreeEntry, b: &FileTreeEntry) -> Ordering {
         (false, true) => Ordering::Greater,
         (true, true) | (false, false) => natural_cmp(&a.name, &b.name),
     }
+}
+
+fn is_default_ignored_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | ".hg"
+            | ".svn"
+            | ".next"
+            | ".nuxt"
+            | ".turbo"
+            | ".cache"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | "coverage"
+            | "vendor"
+    )
 }
 
 fn natural_cmp(a: &str, b: &str) -> Ordering {

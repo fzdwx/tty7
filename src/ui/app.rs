@@ -1238,6 +1238,7 @@ impl Tty7App {
                     leaf.update(cx, |view, cx| view.clear_scrollback(cx));
                 }
             }
+            RefreshFileTree => self.refresh_file_tree(cx),
             ReopenClosedTab => self.reopen_closed_tab(window, cx),
             OpenSettings => self.toggle_settings(window, cx),
             RestartDaemon => self.restart_daemon(window, cx),
