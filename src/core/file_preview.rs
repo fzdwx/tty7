@@ -12,8 +12,18 @@ pub struct FilePreviewDocument {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilePreviewBody {
     Text { text: String, truncated: bool },
+    Image { format: ImagePreviewFormat },
     Binary,
     Error(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImagePreviewFormat {
+    Png,
+    Jpeg,
+    Webp,
+    Gif,
+    Svg,
 }
 
 pub fn load(path: impl AsRef<Path>) -> FilePreviewDocument {
@@ -26,7 +36,7 @@ pub fn load(path: impl AsRef<Path>) -> FilePreviewDocument {
 fn preview_document_path(requested_path: &Path, body: &FilePreviewBody) -> PathBuf {
     match body {
         FilePreviewBody::Error(_) => requested_path.to_path_buf(),
-        FilePreviewBody::Text { .. } | FilePreviewBody::Binary => {
+        FilePreviewBody::Text { .. } | FilePreviewBody::Image { .. } | FilePreviewBody::Binary => {
             std::fs::canonicalize(requested_path).unwrap_or_else(|_| requested_path.to_path_buf())
         }
     }
@@ -37,6 +47,9 @@ fn load_body(path: &Path) -> FilePreviewBody {
         Ok(file) => file,
         Err(err) => return FilePreviewBody::Error(err.to_string()),
     };
+    if let Some(format) = image_preview_format(path) {
+        return FilePreviewBody::Image { format };
+    }
 
     let mut bytes = Vec::with_capacity(MAX_PREVIEW_BYTES.saturating_add(1));
     let limit = MAX_PREVIEW_BYTES as u64 + 1;
@@ -59,6 +72,18 @@ fn decode_bytes(bytes: Vec<u8>, truncated: bool) -> FilePreviewBody {
     match String::from_utf8(bytes) {
         Ok(text) => FilePreviewBody::Text { text, truncated },
         Err(_) => FilePreviewBody::Binary,
+    }
+}
+
+fn image_preview_format(path: &Path) -> Option<ImagePreviewFormat> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some(ImagePreviewFormat::Png),
+        "jpg" | "jpeg" => Some(ImagePreviewFormat::Jpeg),
+        "webp" => Some(ImagePreviewFormat::Webp),
+        "gif" => Some(ImagePreviewFormat::Gif),
+        "svg" => Some(ImagePreviewFormat::Svg),
+        _ => None,
     }
 }
 
@@ -90,6 +115,57 @@ mod tests {
 
         assert_eq!(preview.body, FilePreviewBody::Binary);
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn load_recognizes_common_image_extensions() {
+        let cases = [
+            (
+                "png",
+                FilePreviewBody::Image {
+                    format: ImagePreviewFormat::Png,
+                },
+            ),
+            (
+                "jpg",
+                FilePreviewBody::Image {
+                    format: ImagePreviewFormat::Jpeg,
+                },
+            ),
+            (
+                "jpeg",
+                FilePreviewBody::Image {
+                    format: ImagePreviewFormat::Jpeg,
+                },
+            ),
+            (
+                "webp",
+                FilePreviewBody::Image {
+                    format: ImagePreviewFormat::Webp,
+                },
+            ),
+            (
+                "gif",
+                FilePreviewBody::Image {
+                    format: ImagePreviewFormat::Gif,
+                },
+            ),
+            (
+                "svg",
+                FilePreviewBody::Image {
+                    format: ImagePreviewFormat::Svg,
+                },
+            ),
+        ];
+
+        for (extension, expected) in cases {
+            let path = temp_file_with_extension("image", extension, b"not decoded in core");
+
+            let preview = load(&path);
+
+            assert_eq!(preview.body, expected);
+            std::fs::remove_file(path).ok();
+        }
     }
 
     #[test]
@@ -137,11 +213,30 @@ mod tests {
         assert!(matches!(preview.body, FilePreviewBody::Error(_)));
     }
 
-    fn temp_file(label: &str, bytes: &[u8]) -> PathBuf {
+    #[test]
+    fn load_reports_missing_image_files_as_errors() {
         let path = std::env::temp_dir().join(format!(
-            "tty7-file-preview-{label}-{}-{}",
+            "tty7-file-preview-missing-image-{}-{}.png",
             std::process::id(),
             unique_suffix()
+        ));
+
+        let preview = load(&path);
+
+        assert_eq!(preview.path, path);
+        assert!(matches!(preview.body, FilePreviewBody::Error(_)));
+    }
+
+    fn temp_file(label: &str, bytes: &[u8]) -> PathBuf {
+        temp_file_with_extension(label, "txt", bytes)
+    }
+
+    fn temp_file_with_extension(label: &str, extension: &str, bytes: &[u8]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tty7-file-preview-{label}-{}-{}.{}",
+            std::process::id(),
+            unique_suffix(),
+            extension
         ));
         std::fs::write(&path, bytes).unwrap();
         path

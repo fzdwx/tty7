@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Context, FocusHandle, Focusable, MouseButton, MouseDownEvent, Render, Window, div,
+    App, Context, FocusHandle, Focusable, MouseButton, MouseDownEvent, Render, Window, div, img,
     prelude::*, px,
 };
 use gpui_component::ActiveTheme as _;
@@ -85,6 +85,29 @@ fn render_body(document: &FilePreviewDocument, cx: &mut Context<FilePreview>) ->
                 })
                 .into_any_element()
         }
+        FilePreviewBody::Image { .. } => div()
+            .id("file-preview-image")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .overflow_x_scroll()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .child(
+                img(document.path.clone())
+                    .max_w_full()
+                    .max_h_full()
+                    .with_fallback(|| {
+                        div()
+                            .p_4()
+                            .text_sm()
+                            .child("Failed to load image")
+                            .into_any_element()
+                    }),
+            )
+            .into_any_element(),
         FilePreviewBody::Binary => status_body("Binary file", cx),
         FilePreviewBody::Error(error) => status_body(error, cx),
     }
