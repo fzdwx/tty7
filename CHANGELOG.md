@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-08
+
+### Changed
+
+- Context menus and the "+" dropdown now highlight the hovered row with the
+  same soft fill the command palette uses for its selected row, instead of the
+  stock saturated accent that snapped hard against the rest of the UI. The
+  hover text stays at the normal foreground so it reads clearly on the quieter
+  fill.
+
+### Fixed
+
+- On Windows, a pane no longer hangs open when its shell exits on its own.
+  Typing `exit`, pressing Ctrl-D, or a shell crash ends the shell, but ConPTY's
+  output pipe never reports EOF on a natural exit — and tty7 detected a shell's
+  death solely from that EOF — so the pane was left wedged open, dead but
+  visible. A Windows-only monitor now waits on the shell process directly and
+  reports the exit through the same path a Unix `read()` EOF drives, so the pane
+  closes as it does everywhere else. Closing a tab from the UI was already
+  unaffected; macOS and Linux are unchanged. (#30)
+
+- Nerd Font prompt icons no longer render sliced off on the right. A non-Mono
+  Nerd Font (and the proportional `➜`/`❯` the OS cascade hands back when nothing
+  in your font list covers them) gives an icon a single-cell *advance* but draws
+  ink up to ~1.9 cells wide, and tty7 clipped every lone glyph to exactly one
+  cell — severing the overflow into the half-icons and cut-off arrow from the
+  report. A single glyph now paints into a two-cell window, so it renders whole
+  (bleeding into the trailing blank the way iTerm2 and Terminal.app do), bounded
+  at two cells so a stray face can't smear across the row. Pairs with the native
+  powerline separators from #19; Mono Nerd Fonts are unchanged. (#17)
+
+- New tabs and splits no longer stall for seconds while a zsh plugin manager
+  reinstalls itself. tty7 launches zsh through a throwaway `ZDOTDIR` (so it can
+  layer its shell integration on top of your config), but it used to leave
+  `ZDOTDIR` pointing at that empty temp dir the whole time — so tools that find
+  their own state via `${ZDOTDIR:-$HOME}` (Zim, oh-my-zsh, `compinit`'s
+  `.zcompdump`) looked in the wrong place and rebuilt from scratch on every
+  pane, e.g. Zim reprinting `modules/…: Installed` and hanging for ~3s. Each
+  redirector now points `ZDOTDIR` back at your real config dir while your
+  startup files run, and restores it for the live session, so plugin managers
+  and completion caches resolve correctly and load instantly. As a bonus this
+  also fixes the classic relocated-config layout (a tiny `~/.zshenv` that sets
+  `ZDOTDIR=~/.config/zsh`), which previously loaded your config but silently
+  dropped tty7's integration. (#15)
+
+## [0.6.1] - 2026-07-08
+
+### Fixed
+
+- Tab completion (and other line editing) now stays out of the way over `ssh`.
+  A remote shell that emits its own prompt marks — fish 4.x on a Linux server,
+  most visibly, which ships OSC 133 on by default — used to engage tty7's
+  *local* line editor, so Tab ran completion against the local machine's
+  filesystem instead of reaching the remote shell. tty7 now only drives the
+  inline editor while the shell it launched is itself idle at its prompt;
+  whenever a foreground command (ssh, a TUI, a nested shell) owns the terminal,
+  keystrokes pass straight through to it. (#26, follow-up to #18)
+
 ## [0.6.0] - 2026-07-08
 
 ### Added
@@ -204,7 +262,9 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
-[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/l0ng-ai/tty7/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/l0ng-ai/tty7/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/l0ng-ai/tty7/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/l0ng-ai/tty7/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/l0ng-ai/tty7/compare/v0.3.0...v0.4.0

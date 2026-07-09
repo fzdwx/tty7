@@ -262,11 +262,13 @@ struct PaneState {
 pub struct DaemonPane {
     pub id: u64,
     /// The PTY master. Kept for the pane's lifetime to `resize` it and to query the
-    /// foreground process group (macOS title / cwd fallback). Behind a `Mutex`
-    /// because the trait object is `Send` but not `Sync`, and the pane is shared
-    /// across connection threads via `Arc`; the lock is uncontended in practice
-    /// (resize is rare, the proc query rarer).
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    /// foreground process group (macOS title / cwd fallback, and the reader
+    /// thread's remote-prompt gate — see [`foreground_command_running`]). Behind a
+    /// `Mutex` because the trait object is `Send` but not `Sync`, and the pane is
+    /// shared across connection threads via `Arc`; the lock is uncontended in
+    /// practice (resize is rare, the proc query rarer). Wrapped in an `Arc` so the
+    /// reader thread can hold its own handle for that gate.
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     /// The PTY's input side (keyboard input / pasted text). Behind a `Mutex`
     /// because writes can arrive from different connection threads.
     writer: Mutex<Box<dyn Write + Send>>,
@@ -292,13 +294,70 @@ pub struct DaemonPane {
     reader: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// Fires a pane's "child gone" notification exactly once, whichever thread
+/// notices the death first. On Unix the reader thread sees it as a PTY `read()`
+/// EOF and reports here. On Windows the ConPTY output pipe does *not* EOF when
+/// the shell exits on its own — it only closes on `ClosePseudoConsole`, so a
+/// natural `exit` / Ctrl-D would leave the reader blocked forever and the pane
+/// wedged open (see [`DaemonPane::spawn_exit_monitor`]). There a separate thread
+/// waits on the child handle and reports here instead. The `reported` latch keeps
+/// whichever route fires second a no-op, so a subscriber never sees two `Exited`s
+/// and `on_dead` runs at most once.
+struct DeathReporter {
+    reported: AtomicBool,
+    /// The server's reclaim hook, consumed the first time the pane dies with
+    /// nobody attached. Behind a `Mutex<Option<…>>` because it's a `FnOnce`
+    /// shared between the reader and (on Windows) the monitor — whichever fires
+    /// first takes it.
+    on_dead: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl DeathReporter {
+    fn new(on_dead: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            reported: AtomicBool::new(false),
+            on_dead: Mutex::new(Some(Box::new(on_dead))),
+        }
+    }
+
+    /// Mark the pane not-alive and, unless the owner already began teardown
+    /// (`shutting_down` — the killer owns cleanup then), tell the attached
+    /// subscriber it exited; with nobody attached, hand the pane to `on_dead` so
+    /// the server drops it instead of leaking the zombie child + replay ring.
+    /// Idempotent: only the first call has any effect.
+    fn report(&self, state: &Mutex<PaneState>, shutting_down: &AtomicBool) {
+        if self.reported.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let mut st = state.lock().unwrap();
+        st.alive = false;
+        if shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        let subscribed = st.subscriber.is_some();
+        if let Some(sub) = &st.subscriber {
+            let _ = sub.send(DaemonMsg::Exited { code: None });
+        }
+        drop(st);
+        // A subscriber's later detach reclaims the pane, so only an *unattached*
+        // death needs `on_dead` — and it fires at most once.
+        if subscribed {
+            return;
+        }
+        if let Some(on_dead) = self.on_dead.lock().unwrap().take() {
+            on_dead();
+        }
+    }
+}
+
 impl DaemonPane {
     /// Spawn the user's shell on a fresh PTY in `cwd`, sized to `size`, and start
     /// its reader thread. `id` is the registry id the server assigns. `shell` is
     /// an explicit per-spawn override (the new-tab dropdown) that outranks the
     /// configured default — see [`choose_shell`]. `on_dead` fires (from the
-    /// reader thread) when the child exits while *nobody is attached* — the case
-    /// where no connection's detach would ever reclaim the pane; the server uses
+    /// reader thread, or on Windows the child-exit monitor) when the child exits
+    /// while *nobody is attached* — the case where no connection's detach would
+    /// ever reclaim the pane; the server uses
     /// it to drop the dead pane from its registry instead of leaking the zombie
     /// child + replay ring for the daemon's lifetime.
     pub fn spawn(
@@ -406,9 +465,11 @@ impl DaemonPane {
         let shutting_down = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(OutputGate::new());
 
+        let master = Arc::new(Mutex::new(pair.master));
+
         let pane = Arc::new(Self {
             id,
-            master: Mutex::new(pair.master),
+            master: master.clone(),
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             shell_pid,
@@ -419,7 +480,35 @@ impl DaemonPane {
             reader: Mutex::new(None),
         });
 
-        let reader = Self::spawn_reader(state, shutting_down, gate, reader_handle, on_dead);
+        // Both the reader's EOF and (on Windows) the child-exit monitor report a
+        // death through this shared, run-once latch — see [`DeathReporter`].
+        let death = Arc::new(DeathReporter::new(on_dead));
+
+        // Windows: the ConPTY output pipe never EOFs on a *natural* child exit, so
+        // the reader alone would never notice `exit` / Ctrl-D and the pane would
+        // hang open. Watch the shell handle directly and report through the same
+        // latch. No-op on Unix, where the reader's `read()` EOF already covers it.
+        #[cfg(windows)]
+        Self::spawn_exit_monitor(
+            shell_pid,
+            state.clone(),
+            pane.shutting_down.clone(),
+            death.clone(),
+        );
+
+        // The reader gates a foreground program's OSC 133 prompt marks (a remote
+        // shell over ssh emitting its own) out of `at_prompt`, so tty7's local
+        // line editor stays disengaged for whatever is really reading the
+        // keyboard — see `foreground_command_running` / issue #26.
+        let fg_master = master.clone();
+        let reader = Self::spawn_reader(
+            state,
+            shutting_down,
+            gate,
+            reader_handle,
+            move || foreground_command_running(&fg_master, shell_pid),
+            death,
+        );
         *pane.reader.lock().unwrap() = Some(reader);
 
         Ok(pane)
@@ -428,15 +517,19 @@ impl DaemonPane {
     /// Reader thread: blocking-reads PTY bytes and, for each chunk, (a) appends to
     /// the ring (dropping the oldest bytes past `RING_CAP`), (b) forwards them to
     /// the subscriber as `Output`, (c) sniffs OSC 7 / OSC 133 and pushes `Cwd` /
-    /// `Prompt` on change. On EOF it marks the pane not-alive and sends `Exited`,
-    /// keeping the ring for a later attach — or, when nobody is attached to hear
-    /// the exit, hands the death to `on_dead` (see [`DaemonPane::spawn`]).
+    /// `Prompt` on change. On EOF it reports the death through `death` — marking
+    /// the pane not-alive and sending `Exited`, keeping the ring for a later
+    /// attach, or handing an unattached pane to `on_dead` (see [`DeathReporter`]).
     fn spawn_reader(
         state: Arc<Mutex<PaneState>>,
         shutting_down: Arc<AtomicBool>,
         gate: Arc<OutputGate>,
         mut reader: Box<dyn Read + Send>,
-        on_dead: impl FnOnce() + Send + 'static,
+        // "Is a foreground command (not the shell) currently on the PTY?" Consulted
+        // when a prompt mark arrives, to reject marks a foreground program emits —
+        // see the call site and [`foreground_command_running`].
+        foreground_running: impl Fn() -> bool + Send + 'static,
+        death: Arc<DeathReporter>,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
             .name("tty7-daemon-pane-reader".to_string())
@@ -489,7 +582,29 @@ impl DaemonPane {
                             let bytes = &buf[..n];
                             // Sniff first (cheap, over the same bytes); collect any
                             // cwd/prompt change to emit while we hold the lock.
-                            let signals = sniffer.feed(bytes);
+                            let mut signals = sniffer.feed(bytes);
+
+                            // Reject a prompt mark emitted by a *foreground program*
+                            // rather than the shell tty7 spawned. The shell only
+                            // emits its OSC 133 marks while it is the PTY's own
+                            // foreground group (idle at its prompt); a mark arriving
+                            // while a command owns the PTY therefore comes from that
+                            // command — most visibly a remote shell over ssh drawing
+                            // its own prompt. Trusting it would flip `at_prompt` true
+                            // and engage tty7's *local* line editor, whose completion
+                            // and history are local-only and wrong for the remote
+                            // session (Tab completed local paths instead of the
+                            // remote's). Drop the flag so keys pass raw to whatever is
+                            // really reading them. The proc query runs only when a
+                            // mark actually claims the prompt — about once per prompt.
+                            // See issue #26.
+                            if signals.shell.as_ref().is_some_and(|s| s.at_prompt)
+                                && foreground_running()
+                            {
+                                if let Some(s) = signals.shell.as_mut() {
+                                    s.at_prompt = false;
+                                }
+                            }
 
                             let tr1 = trace.then(std::time::Instant::now);
                             let mut st = state.lock().unwrap();
@@ -513,25 +628,12 @@ impl DaemonPane {
                     }
                 }
 
-                // Child gone: mark not-alive and notify the subscriber, unless we
-                // initiated teardown (the connection is ending anyway; the killer
-                // also owns the registry cleanup). With a subscriber, the ring is
-                // left intact and that connection's later detach reclaims the
-                // pane. With *no* subscriber there is no such connection: fire
-                // `on_dead` so the owner can reclaim, or the dead pane (zombie
-                // child + ring + PTY fds) outlives everything in the registry.
-                let mut st = state.lock().unwrap();
-                st.alive = false;
-                if !shutting_down.load(Ordering::SeqCst) {
-                    let subscribed = st.subscriber.is_some();
-                    if let Some(sub) = &st.subscriber {
-                        let _ = sub.send(DaemonMsg::Exited { code: None });
-                    }
-                    drop(st);
-                    if !subscribed {
-                        on_dead();
-                    }
-                }
+                // Child gone (EOF): report the death — mark not-alive and notify
+                // the subscriber, or hand an unattached pane to `on_dead` — unless
+                // we initiated teardown. On Windows the monitor may have already
+                // reported this same death; the latch makes the second call a
+                // no-op. See [`DeathReporter::report`].
+                death.report(&state, &shutting_down);
             })
             .expect("spawn daemon pane reader thread")
     }
@@ -678,6 +780,61 @@ impl DaemonPane {
                 crate::daemon::winproc::terminate(target);
             }
         }
+    }
+
+    /// Windows-only: watch the shell for a *natural* exit (`exit`, Ctrl-D, a
+    /// crash) the ConPTY reader can't observe. The ConPTY output pipe reports EOF
+    /// only once the pseudoconsole is closed (`ClosePseudoConsole`), not when the
+    /// child dies — and the reader itself holds a `master` handle (the fg-gate
+    /// clone), so it can keep its own pipe open. Without this a shell that exits
+    /// on its own leaves the reader blocked and the pane wedged open forever.
+    ///
+    /// We open a wait-only handle to the shell *now*, while it's alive, so pid
+    /// reuse can't retarget the wait, then block a thread on it. When it signals,
+    /// the death flows through the shared latch — the same `Exited` / `on_dead`
+    /// the reader's EOF drives on Unix. The kill path is unaffected: it sets
+    /// `shutting_down`, under which `report` is a silent no-op.
+    #[cfg(windows)]
+    fn spawn_exit_monitor(
+        shell_pid: Option<u32>,
+        state: Arc<Mutex<PaneState>>,
+        shutting_down: Arc<AtomicBool>,
+        death: Arc<DeathReporter>,
+    ) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+
+        let Some(pid) = shell_pid else { return };
+        // SAFETY: `OpenProcess` on a currently-live pid for wait-only access. A null
+        // return (already gone, or access denied) is handled below; on success the
+        // handle is closed by the monitor thread after its single wait.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            // Couldn't watch it — report at once rather than risk wedging the pane
+            // open. Opening a just-spawned child essentially never fails.
+            death.report(&state, &shutting_down);
+            return;
+        }
+        // `HANDLE` is a raw pointer and thus `!Send`; move it across the thread
+        // boundary as an integer and rebuild it inside. It names a kernel object we
+        // own for the handle's lifetime, so this is just relocating ownership.
+        let handle = handle as isize;
+        std::thread::Builder::new()
+            .name("tty7-daemon-pane-exit-monitor".to_string())
+            .spawn(move || {
+                let handle = handle as windows_sys::Win32::Foundation::HANDLE;
+                // SAFETY: `handle` is our live process handle; waited once (any
+                // return — signaled or failed — means the child is effectively
+                // gone), then closed exactly once.
+                unsafe {
+                    WaitForSingleObject(handle, INFINITE);
+                    CloseHandle(handle);
+                }
+                death.report(&state, &shutting_down);
+            })
+            .expect("spawn daemon pane exit monitor thread");
     }
 
     /// Post `sig` to the child's process group(s), not just the shell pid. The
@@ -968,6 +1125,49 @@ fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
                 last_exit: shell.last_exit_code,
             });
         }
+    }
+}
+
+/// Whether a foreground command — not the shell itself — currently owns the
+/// PTY. True while e.g. `ssh`, `vim`, or a nested shell runs; false when the
+/// shell sits idle at its own prompt (it is then the terminal's foreground
+/// process group). Unknown/missing data answers false, so a bad reading never
+/// suppresses a real local prompt.
+///
+/// This is the signal that keeps a foreground program's OSC 133 marks — a fish
+/// session over ssh emitting its own prompt marks, most visibly — from engaging
+/// tty7's local line editor, whose completion and history are local-only and
+/// wrong for whatever is really reading the keyboard. See issue #26.
+fn foreground_command_running(
+    master: &Mutex<Box<dyn MasterPty + Send>>,
+    shell_pid: Option<u32>,
+) -> bool {
+    is_foreground_command(pty_foreground_pgid(master), shell_pid)
+}
+
+/// The PTY's foreground process-group id (`pid_t`, i.e. `i32`), read from the
+/// terminal via `tcgetpgrp`, or `None` when it can't be read.
+#[cfg(unix)]
+fn pty_foreground_pgid(master: &Mutex<Box<dyn MasterPty + Send>>) -> Option<i32> {
+    master.lock().ok().and_then(|m| m.process_group_leader())
+}
+
+/// Windows conpty has no foreground-process-group concept — portable-pty doesn't
+/// implement `process_group_leader` there — so there is nothing to gate on: we
+/// answer `None`, leaving prompt marks handled exactly as before. (ssh from a
+/// Windows tty7 is rare and uses a different model anyway.)
+#[cfg(not(unix))]
+fn pty_foreground_pgid(_master: &Mutex<Box<dyn MasterPty + Send>>) -> Option<i32> {
+    None
+}
+
+/// Pure core of [`foreground_command_running`]: given the PTY's foreground
+/// process group and the shell's pid, is the foreground group some *other*
+/// process (a running command) rather than the shell idling at its prompt?
+fn is_foreground_command(fg_pgid: Option<i32>, shell_pid: Option<u32>) -> bool {
+    match (fg_pgid, shell_pid) {
+        (Some(pg), Some(shell)) if pg > 0 => pg as u32 != shell,
+        _ => false,
     }
 }
 
@@ -1425,6 +1625,57 @@ mod tests {
         assert_eq!(d.shell.as_ref().unwrap().last_exit_code, Some(130));
     }
 
+    /// The foreground-command predicate: only a process group *other* than the
+    /// shell counts as a running command; matching pids, or missing data, mean
+    /// the shell is idle at its own prompt (so we never suppress a real prompt).
+    #[test]
+    fn foreground_command_distinguishes_the_shell_from_a_command() {
+        // Shell idle at its prompt: the shell is the PTY's foreground group.
+        assert!(!is_foreground_command(Some(1000), Some(1000)));
+        // A command (ssh, vim, a nested shell) owns the PTY: a different group.
+        assert!(is_foreground_command(Some(2000), Some(1000)));
+        // Unknown foreground group, unknown shell pid, or a non-positive pgid all
+        // answer "shell is foreground" — a bad reading must not disengage editing.
+        assert!(!is_foreground_command(None, Some(1000)));
+        assert!(!is_foreground_command(Some(2000), None));
+        assert!(!is_foreground_command(Some(0), Some(1000)));
+    }
+
+    /// The reader's gate for issue #26: a remote shell over ssh emits its own
+    /// OSC 133 marks, which the sniffer reads as "at prompt" — but because a
+    /// foreground command (ssh) owns the PTY, the reader drops that flag so
+    /// tty7's local line editor stays disengaged and Tab reaches the remote shell.
+    #[test]
+    fn foreground_program_prompt_marks_do_not_claim_the_prompt() {
+        let mut s = OscSniffer::new();
+        // The remote fish draws its prompt: A (start) then B (input begins).
+        let mut signals = s.feed(b"\x1b]133;A\x1b]133;B\x07");
+        assert!(
+            signals.shell.as_ref().unwrap().at_prompt,
+            "the raw marks read as at-prompt"
+        );
+
+        // The reader consults the foreground gate before reporting. With ssh (a
+        // different process group) on the PTY, the prompt flag is cleared.
+        let ssh_running = is_foreground_command(Some(2000), Some(1000));
+        if signals.shell.as_ref().is_some_and(|st| st.at_prompt) && ssh_running {
+            signals.shell.as_mut().unwrap().at_prompt = false;
+        }
+        assert!(
+            !signals.shell.as_ref().unwrap().at_prompt,
+            "a foreground program's prompt marks must not engage the local editor"
+        );
+
+        // Sanity: the very same marks with the shell itself foreground (idle at a
+        // local prompt) keep at_prompt true — the local editor still engages.
+        let mut local = s.feed(b"\x1b]133;A\x1b]133;B\x07");
+        let shell_idle = is_foreground_command(Some(1000), Some(1000));
+        if local.shell.as_ref().is_some_and(|st| st.at_prompt) && shell_idle {
+            local.shell.as_mut().unwrap().at_prompt = false;
+        }
+        assert!(local.shell.as_ref().unwrap().at_prompt);
+    }
+
     /// Regression: a well-formed OSC marker directly following an *unterminated*
     /// one must not be dropped. A bare ESC inside an OSC aborts the current
     /// sequence (VT semantics) and — when the next byte is `]` — introduces a new
@@ -1710,7 +1961,10 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(b"tail".to_vec())),
-            move || dead_flag.store(true, Ordering::SeqCst),
+            || false, // no PTY here → treat the shell as foreground
+            Arc::new(DeathReporter::new(move || {
+                dead_flag.store(true, Ordering::SeqCst)
+            })),
         );
         handle.join().unwrap(); // the Cursor EOFs immediately after "tail"
 
@@ -1740,7 +1994,8 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(Vec::new())),
-            move || dead_tx.send(()).unwrap(),
+            || false,
+            Arc::new(DeathReporter::new(move || dead_tx.send(()).unwrap())),
         );
         handle.join().unwrap();
 
@@ -1761,12 +2016,60 @@ mod tests {
             Arc::new(AtomicBool::new(true)), // teardown already initiated
             Arc::new(OutputGate::new()),
             Box::new(std::io::Cursor::new(Vec::new())),
-            move || dead_flag.store(true, Ordering::SeqCst),
+            || false,
+            Arc::new(DeathReporter::new(move || {
+                dead_flag.store(true, Ordering::SeqCst)
+            })),
         );
         handle.join().unwrap();
 
         assert!(!state.lock().unwrap().alive);
         assert!(!dead.load(Ordering::SeqCst));
+    }
+
+    /// The latch that lets the reader's EOF and (on Windows) the child-exit
+    /// monitor both report the same death without the subscriber seeing two
+    /// `Exited`s: the first `report` notifies, the second is a silent no-op.
+    #[test]
+    fn death_reporter_notifies_once_across_racing_callers() {
+        let state = Arc::new(Mutex::new(test_state(true)));
+        let (sub_tx, sub_rx) = mpsc::channel();
+        state.lock().unwrap().subscriber = Some(sub_tx);
+        let shutting_down = AtomicBool::new(false);
+        let calls = Arc::new(AtomicBool::new(false));
+        let calls_flag = calls.clone();
+        let death = DeathReporter::new(move || calls_flag.store(true, Ordering::SeqCst));
+
+        // Two reporters (stand-ins for the reader and the monitor) both fire.
+        death.report(&state, &shutting_down);
+        death.report(&state, &shutting_down);
+
+        assert!(!state.lock().unwrap().alive);
+        // Exactly one `Exited`, then nothing more.
+        assert!(matches!(
+            sub_rx.try_recv(),
+            Ok(DaemonMsg::Exited { code: None })
+        ));
+        assert!(
+            sub_rx.try_recv().is_err(),
+            "a second report must not re-notify"
+        );
+    }
+
+    /// With nobody attached, the *first* report hands the pane to `on_dead` and a
+    /// racing second report neither re-fires it nor panics on the taken `FnOnce`.
+    #[test]
+    fn death_reporter_fires_on_dead_at_most_once() {
+        let state = Arc::new(Mutex::new(test_state(true)));
+        let shutting_down = AtomicBool::new(false);
+        let (dead_tx, dead_rx) = mpsc::channel();
+        let death = DeathReporter::new(move || dead_tx.send(()).unwrap());
+
+        death.report(&state, &shutting_down);
+        death.report(&state, &shutting_down);
+
+        assert!(dead_rx.try_recv().is_ok(), "unattached death → on_dead");
+        assert!(dead_rx.try_recv().is_err(), "on_dead must fire only once");
     }
 
     /// `apply_signals` writes sniffed cwd/shell state into the pane state.
