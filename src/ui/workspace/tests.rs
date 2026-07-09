@@ -122,6 +122,116 @@ fn git_branch_label_is_none_outside_git_repository() {
     std::fs::remove_dir_all(root).ok();
 }
 
+#[test]
+fn workspace_index_after_delete_keeps_a_valid_neighbor_active() {
+    assert_eq!(workspace_index_after_delete(0, 0, 1), None);
+    assert_eq!(workspace_index_after_delete(1, 0, 3), Some(0));
+    assert_eq!(workspace_index_after_delete(1, 1, 3), Some(1));
+    assert_eq!(workspace_index_after_delete(2, 1, 3), Some(1));
+    assert_eq!(workspace_index_after_delete(2, 2, 3), Some(1));
+}
+
+#[test]
+fn apply_workspace_root_preserves_width_and_clears_path_state() {
+    let old_root = temp_workspace("old-root");
+    let new_root = temp_workspace("new-root");
+    let mut workspace = SessionWorkspace {
+        id: "w1".into(),
+        name: Some("Work".into()),
+        root_override: None,
+        identity_cwd: old_root.clone(),
+        root: old_root.clone(),
+        active_tab: 0,
+        tabs: Vec::new(),
+        file_tree: SessionFileTreeState {
+            visible: false,
+            width: 360.0,
+            expanded_dirs: vec![old_root.join("src")],
+            selected_path: Some(old_root.join("src/main.rs")),
+        },
+    };
+
+    apply_workspace_root(&mut workspace, new_root.clone());
+
+    assert_eq!(workspace.identity_cwd, new_root);
+    assert_eq!(workspace.root, workspace.identity_cwd);
+    assert!(!workspace.file_tree.visible);
+    assert_eq!(workspace.file_tree.width, 360.0);
+    assert!(workspace.file_tree.expanded_dirs.is_empty());
+    assert!(workspace.file_tree.selected_path.is_none());
+    std::fs::remove_dir_all(old_root).ok();
+    std::fs::remove_dir_all(workspace.root).ok();
+}
+
+#[test]
+fn root_override_survives_identity_cwd_changes() {
+    let manual_root = temp_workspace("manual-root");
+    let inferred_root = temp_project("inferred-root");
+    let inferred_cwd = inferred_root.join("src");
+    std::fs::create_dir_all(&inferred_cwd).unwrap();
+    let mut workspace = SessionWorkspace::from_tabs(
+        "w1".into(),
+        0,
+        vec![SessionTab::terminal(
+            None,
+            SessionPane::Leaf {
+                cwd: Some(manual_root.clone()),
+                pane_id: None,
+            },
+        )],
+    );
+    apply_workspace_root(&mut workspace, manual_root.clone());
+
+    let workspace = workspace.with_tabs(
+        0,
+        vec![SessionTab::terminal(
+            None,
+            SessionPane::Leaf {
+                cwd: Some(inferred_cwd.clone()),
+                pane_id: None,
+            },
+        )],
+    );
+
+    assert_eq!(workspace.identity_cwd, inferred_cwd);
+    assert_eq!(workspace.root, manual_root);
+    assert_eq!(workspace.root_override, Some(workspace.root.clone()));
+    std::fs::remove_dir_all(workspace.root).ok();
+    std::fs::remove_dir_all(inferred_root).ok();
+}
+
+#[test]
+fn session_pane_ids_collects_nested_terminal_panes_only() {
+    let tabs = vec![
+        SessionTab::preview(Some("preview".into()), PathBuf::from("/work/README.md")),
+        SessionTab::terminal(
+            Some("term".into()),
+            SessionPane::Split {
+                axis: crate::core::session::SessionAxis::Horizontal,
+                ratio: 0.5,
+                a: Box::new(SessionPane::Leaf {
+                    cwd: None,
+                    pane_id: Some(10),
+                }),
+                b: Box::new(SessionPane::Split {
+                    axis: crate::core::session::SessionAxis::Vertical,
+                    ratio: 0.5,
+                    a: Box::new(SessionPane::Leaf {
+                        cwd: None,
+                        pane_id: None,
+                    }),
+                    b: Box::new(SessionPane::Leaf {
+                        cwd: None,
+                        pane_id: Some(12),
+                    }),
+                }),
+            },
+        ),
+    ];
+
+    assert_eq!(session_pane_ids(&tabs), vec![10, 12]);
+}
+
 fn temp_project(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "tty7-workspace-cwd-{label}-{}-{}",

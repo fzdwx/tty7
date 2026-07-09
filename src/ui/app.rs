@@ -121,6 +121,12 @@ pub(crate) struct FileTreeRenaming {
     pub(crate) _subs: Vec<Subscription>,
 }
 
+pub(crate) struct WorkspaceRenaming {
+    pub(crate) index: usize,
+    pub(crate) input: Entity<InputState>,
+    pub(crate) _subs: Vec<Subscription>,
+}
+
 pub struct Tty7App {
     /// The open tabs; each owns a split-pane tree and an optional name.
     pub(crate) tabs: Vec<Tab>,
@@ -172,6 +178,7 @@ pub struct Tty7App {
     /// `Some` while a tab label is being renamed inline; `None` otherwise.
     pub(crate) renaming: Option<Renaming>,
     pub(crate) file_tree_renaming: Option<FileTreeRenaming>,
+    pub(crate) workspace_renaming: Option<WorkspaceRenaming>,
     /// When `Some`, the active tab renders only this one leaf full-window
     /// (Cmd+Shift+Enter maximize). Cleared on any structural / navigation change.
     pub(crate) maximized: Option<Entity<TerminalView>>,
@@ -264,6 +271,7 @@ impl Tty7App {
             closed: Vec::new(),
             renaming: None,
             file_tree_renaming: None,
+            workspace_renaming: None,
             maximized: None,
             mod_hint_badges: false,
             mod_hint_gen: 0,
@@ -1033,6 +1041,7 @@ impl Tty7App {
         // indices and would let the pending edit commit onto the wrong tab. Drop it.
         self.renaming = None;
         self.file_tree_renaming = None;
+        self.workspace_renaming = None;
         if !self.tabs[index].is_settings() {
             let snapshot = tab_to_session(&self.tabs[index], cx);
             self.closed.push(snapshot);
@@ -1073,6 +1082,7 @@ impl Tty7App {
         // commit onto the wrong tab. Drop it.
         self.renaming = None;
         self.file_tree_renaming = None;
+        self.workspace_renaming = None;
         let was_active = self.active;
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
@@ -1349,7 +1359,7 @@ impl Tty7App {
         }
     }
 
-    fn close_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.file_search = None;
         self.file_search_sub = None;
         self.focus_active(window, cx);

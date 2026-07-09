@@ -127,6 +127,7 @@ impl Default for SessionFileTreeState {
 pub struct SessionWorkspace {
     pub id: String,
     pub name: Option<String>,
+    pub root_override: Option<PathBuf>,
     pub identity_cwd: PathBuf,
     pub root: PathBuf,
     pub active_tab: usize,
@@ -142,6 +143,7 @@ impl SessionWorkspace {
         Self {
             id,
             name: None,
+            root_override: None,
             identity_cwd,
             root,
             active_tab,
@@ -153,7 +155,10 @@ impl SessionWorkspace {
     pub fn with_tabs(mut self, active_tab: usize, tabs: Vec<SessionTab>) -> Self {
         self.active_tab = clamp_active_tab(active_tab, &tabs);
         if let Some(identity_cwd) = workspace_seed_cwd(self.active_tab, &tabs) {
-            let root = discover_workspace_root(&identity_cwd);
+            let root = self
+                .root_override
+                .clone()
+                .unwrap_or_else(|| discover_workspace_root(&identity_cwd));
             if self.root != root {
                 self.root = root;
                 self.file_tree.expanded_dirs.clear();
@@ -287,6 +292,7 @@ impl Session {
                     }
                 });
             let root = discover_workspace_root(&identity_cwd);
+            let root = workspace.root_override.clone().unwrap_or(root);
             if workspace.root != root {
                 workspace.root = root;
                 workspace.file_tree.expanded_dirs.clear();
