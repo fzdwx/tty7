@@ -50,6 +50,7 @@ impl Tty7App {
             self.file_tree_root.display()
         );
         self.file_tree_cache.clear();
+        self.file_search_index = None;
         cx.notify();
     }
 

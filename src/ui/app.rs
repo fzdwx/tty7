@@ -2,6 +2,7 @@
 //! with the active terminal filling the rest. Owns all tabs (each its own PTY).
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui::{
     App, Axis, Context, Entity, KeyDownEvent, PromptLevel, ScrollHandle, Subscription, Window, div,
@@ -22,6 +23,7 @@ use crate::core::session::{
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
 use crate::terminal::view::{ChildExited, CwdChanged, TerminalView};
+use crate::ui::file_search::{FileSearchEvent, FileSearchView};
 use crate::ui::file_tree::FileTreeCache;
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Pane};
@@ -153,6 +155,9 @@ pub struct Tty7App {
     palette: Option<Entity<PaletteView>>,
     /// Keeps the open palette's event subscription alive; dropped on close.
     palette_sub: Option<Subscription>,
+    file_search: Option<Entity<FileSearchView>>,
+    file_search_sub: Option<Subscription>,
+    pub(crate) file_search_index: Option<(PathBuf, Rc<crate::core::file_search::FileSearchIndex>)>,
     /// Stack of recently closed tabs (most recent on top) for Cmd+Shift+T.
     /// Stored serialized so each entry carries the panes' cwd + name at close.
     /// `pub(crate)` so the home page can surface the top entry as its
@@ -246,6 +251,9 @@ impl Tty7App {
             _keystroke_watch: keystroke_watch,
             palette: None,
             palette_sub: None,
+            file_search: None,
+            file_search_sub: None,
+            file_search_index: None,
             closed: Vec::new(),
             renaming: None,
             maximized: None,
@@ -1215,6 +1223,7 @@ impl Tty7App {
         use CommandKind::*;
         match kind {
             NewTab => self.new_tab(window, cx),
+            OpenFileSearch => self.open_file_search(window, cx),
             SplitRight => self.split(Axis::Horizontal, window, cx),
             SplitDown => self.split(Axis::Vertical, window, cx),
             ClosePane => self.close_pane(window, cx),
@@ -1259,6 +1268,71 @@ impl Tty7App {
             OpenThemePicker => {}
             ActivateTab(i) => self.activate(i, window, cx),
         }
+    }
+
+    fn open_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_search.is_some() {
+            self.close_file_search(window, cx);
+            return;
+        }
+
+        let root = self.file_tree_root.clone();
+        let index = match self.file_search_index.as_ref() {
+            Some((cached_root, index)) if cached_root == &root => Ok(index.clone()),
+            _ => crate::core::file_search::FileSearchIndex::new(&root).map(|index| {
+                let index = Rc::new(index);
+                self.file_search_index = Some((root.clone(), index.clone()));
+                index
+            }),
+        };
+
+        match index {
+            Ok(index) => {
+                let view = cx.new(|cx| FileSearchView::new(index, window, cx));
+                self.file_search_sub =
+                    Some(cx.subscribe_in(&view, window, Self::on_file_search_event));
+                self.file_search = Some(view);
+                cx.notify();
+            }
+            Err(err) => {
+                let message = err.to_string();
+                let prompt = window.prompt(
+                    PromptLevel::Warning,
+                    "Open File Failed",
+                    Some(&message),
+                    &["OK"],
+                    cx,
+                );
+                cx.spawn(async move |_this, _cx| {
+                    let _ = prompt.await;
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn on_file_search_event(
+        &mut self,
+        _view: &Entity<FileSearchView>,
+        ev: &FileSearchEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match ev {
+            FileSearchEvent::Open(path) => {
+                let path = path.clone();
+                self.close_file_search(window, cx);
+                self.open_file_preview(path, window, cx);
+            }
+            FileSearchEvent::Dismiss => self.close_file_search(window, cx),
+        }
+    }
+
+    fn close_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_search = None;
+        self.file_search_sub = None;
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     // ----- Settings tab (Cmd+,) -------------------------------------------
@@ -2005,7 +2079,10 @@ impl Render for Tty7App {
                                 layout.child(self.render_file_tree(cx))
                             })
                     })
-                    .when_some(self.palette.clone(), |this, palette| this.child(palette)),
+                    .when_some(self.palette.clone(), |this, palette| this.child(palette))
+                    .when_some(self.file_search.clone(), |this, file_search| {
+                        this.child(file_search)
+                    }),
             )
     }
 }

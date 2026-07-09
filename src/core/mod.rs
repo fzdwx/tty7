@@ -10,6 +10,7 @@
 pub mod actions;
 pub mod config;
 pub mod file_preview;
+pub mod file_search;
 pub mod file_tree;
 pub mod logger;
 pub mod osc;

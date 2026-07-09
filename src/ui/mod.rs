@@ -8,6 +8,7 @@
 pub mod app;
 pub mod assets;
 mod file_icons;
+pub mod file_search;
 pub mod file_tree;
 pub mod hints;
 pub mod home;

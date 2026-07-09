@@ -29,6 +29,7 @@ use crate::core::config::Config;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
     NewTab,
+    OpenFileSearch,
     SplitRight,
     SplitDown,
     ClosePane,
@@ -72,9 +73,8 @@ impl CommandKind {
             ReopenClosedTab => "ReopenClosedTab",
             OpenSettings => "OpenSettings",
             RestartDaemon => "RestartDaemon",
-            FindInTerminal | RefreshFileTree | OpenThemePicker | SetTheme(_) | ActivateTab(_) => {
-                return None;
-            }
+            OpenFileSearch | FindInTerminal | RefreshFileTree | OpenThemePicker | SetTheme(_)
+            | ActivateTab(_) => return None,
         })
     }
 }
@@ -106,6 +106,7 @@ impl Command {
         use CommandKind::*;
         vec![
             Command::new("New Tab", NewTab),
+            Command::new("Open File…", OpenFileSearch),
             Command::new("Split Right", SplitRight),
             Command::new("Split Down", SplitDown),
             Command::new("Close Pane/Tab", ClosePane),
