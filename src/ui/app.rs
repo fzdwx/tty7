@@ -123,6 +123,8 @@ pub struct Tty7App {
     pub(crate) file_tree_root: PathBuf,
     pub(crate) file_tree_state: SessionFileTreeState,
     pub(crate) file_tree_cache: FileTreeCache,
+    pub(crate) file_tree_scroll_handle: ScrollHandle,
+    pub(crate) pending_file_tree_reveal: Option<PathBuf>,
     /// Current global font size (px), applied to every pane in every tab.
     pub(crate) font_size: f32,
     /// Current global line-height multiplier, applied to every pane.
@@ -233,6 +235,8 @@ impl Tty7App {
             file_tree_root,
             file_tree_state,
             file_tree_cache: FileTreeCache::default(),
+            file_tree_scroll_handle: ScrollHandle::new(),
+            pending_file_tree_reveal: None,
             font_size,
             line_height,
             font_family,
@@ -967,6 +971,9 @@ impl Tty7App {
         if index < self.tabs.len() && index != self.active {
             self.maximized = None;
             self.active = index;
+            if let Some(path) = self.active_preview_path(cx) {
+                self.reveal_file_tree_path(path, cx);
+            }
             self.focus_active(window, cx);
             self.save_session(cx);
             cx.notify();
@@ -1767,7 +1774,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let path = canonical_preview_path(path);
-        self.file_tree_state.selected_path = Some(path.clone());
+        self.reveal_file_tree_path(path.clone(), cx);
         if let Some((index, preview)) = self.find_preview_tab(&path, cx) {
             self.active = index;
             self.maximized = None;
@@ -1792,6 +1799,14 @@ impl Tty7App {
             let preview = tab.preview.as_ref()?;
             (preview.read(cx).path.as_path() == path).then(|| (index, preview.clone()))
         })
+    }
+
+    fn active_preview_path(&self, cx: &App) -> Option<PathBuf> {
+        self.tabs
+            .get(self.active)?
+            .preview
+            .as_ref()
+            .map(|preview| preview.read(cx).path.clone())
     }
 
     /// Open `config.json` with the OS default handler (Settings → Keybindings).

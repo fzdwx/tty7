@@ -15,6 +15,33 @@ use rows as file_tree_rows;
 
 pub(crate) use cache::FileTreeCache;
 
+fn expand_dirs_to_reveal_path(root: &Path, path: &Path, expanded_dirs: &mut Vec<PathBuf>) {
+    if !path.starts_with(root) {
+        return;
+    }
+    let Some(mut dir) = path.parent() else {
+        return;
+    };
+    let mut dirs = Vec::new();
+    while dir != root {
+        dirs.push(dir.to_path_buf());
+        let Some(parent) = dir.parent() else {
+            break;
+        };
+        dir = parent;
+    }
+    dirs.reverse();
+    for dir in dirs {
+        if !expanded_dirs.iter().any(|expanded| expanded == &dir) {
+            expanded_dirs.push(dir);
+        }
+    }
+}
+
+fn path_is_within_dir(path: &Path, dir: &Path) -> bool {
+    path == dir || path.starts_with(dir)
+}
+
 impl Tty7App {
     pub(crate) fn refresh_file_tree(&mut self, cx: &mut Context<Self>) {
         log::debug!(
@@ -26,13 +53,37 @@ impl Tty7App {
         cx.notify();
     }
 
+    pub(crate) fn reveal_file_tree_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !path.starts_with(&self.file_tree_root) {
+            return;
+        }
+        self.file_tree_state.selected_path = Some(path.clone());
+        expand_dirs_to_reveal_path(
+            &self.file_tree_root,
+            &path,
+            &mut self.file_tree_state.expanded_dirs,
+        );
+        self.pending_file_tree_reveal = Some(path.clone());
+        log::debug!(
+            target: "tty7::file_tree",
+            "reveal file tree path={} expanded_dirs={}",
+            path.display(),
+            self.file_tree_state.expanded_dirs.len()
+        );
+        self.save_session(cx);
+        cx.notify();
+    }
+
     pub(crate) fn render_file_tree(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let started = Instant::now();
         let root = self.file_tree_root.clone();
         self.file_tree_cache.reset_to_root(&root);
         let mut rows = Vec::new();
+        let mut selected_row = None;
         match FileTree::new(&root) {
-            Ok(tree) => self.collect_file_tree_rows(&tree, &root, 0, &mut rows, cx),
+            Ok(tree) => {
+                self.collect_file_tree_rows(&tree, &root, 0, &mut rows, &mut selected_row, cx)
+            }
             Err(err) => rows.push(
                 div()
                     .px_3()
@@ -42,6 +93,16 @@ impl Tty7App {
                     .child(err.to_string())
                     .into_any_element(),
             ),
+        }
+        if self.pending_file_tree_reveal.is_some() {
+            if let Some(row) = selected_row {
+                self.file_tree_scroll_handle.scroll_to_item(row);
+                log::debug!(
+                    target: "tty7::file_tree",
+                    "scroll file tree to selected row row={row}"
+                );
+            }
+            self.pending_file_tree_reveal = None;
         }
         log::debug!(
             target: "tty7::file_tree",
@@ -67,6 +128,7 @@ impl Tty7App {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.file_tree_scroll_handle)
                     .py_1()
                     .children(rows),
             )
@@ -79,11 +141,19 @@ impl Tty7App {
         dir: &Path,
         depth: usize,
         rows: &mut Vec<AnyElement>,
+        selected_row: &mut Option<usize>,
         cx: &mut Context<Self>,
     ) {
         match self.file_tree_cache.children(tree, dir) {
             Ok(entries) => {
-                self.collect_file_tree_entries(tree, entries.as_ref(), depth, rows, cx);
+                self.collect_file_tree_entries(
+                    tree,
+                    entries.as_ref(),
+                    depth,
+                    rows,
+                    selected_row,
+                    cx,
+                );
             }
             Err(err) => rows.push(file_tree_rows::error_row(err, depth, cx)),
         }
@@ -95,13 +165,29 @@ impl Tty7App {
         entries: &[FileTreeEntry],
         depth: usize,
         rows: &mut Vec<AnyElement>,
+        selected_row: &mut Option<usize>,
         cx: &mut Context<Self>,
     ) {
         for entry in entries {
             let expanded = self.is_file_tree_expanded(&entry.path);
+            if self
+                .file_tree_state
+                .selected_path
+                .as_ref()
+                .is_some_and(|selected| selected == &entry.path)
+            {
+                *selected_row = Some(rows.len());
+            }
             rows.push(self.render_file_tree_entry(entry, depth, expanded, cx));
             if entry.is_dir() && expanded {
-                self.collect_expanded_file_tree_dir(tree, &entry.path, depth + 1, rows, cx);
+                self.collect_expanded_file_tree_dir(
+                    tree,
+                    &entry.path,
+                    depth + 1,
+                    rows,
+                    selected_row,
+                    cx,
+                );
             }
         }
     }
@@ -112,12 +198,29 @@ impl Tty7App {
         dir: &Path,
         depth: usize,
         rows: &mut Vec<AnyElement>,
+        selected_row: &mut Option<usize>,
         cx: &mut Context<Self>,
     ) {
         match self.file_tree_cache.children(tree, dir) {
             Ok(entries) if file_tree_rows::dir_children_need_inner_scroll(entries.len()) => {
                 let mut inner_rows = Vec::new();
-                self.collect_file_tree_entries(tree, entries.as_ref(), depth, &mut inner_rows, cx);
+                let mut inner_selected_row = None;
+                self.collect_file_tree_entries(
+                    tree,
+                    entries.as_ref(),
+                    depth,
+                    &mut inner_rows,
+                    &mut inner_selected_row,
+                    cx,
+                );
+                if self
+                    .file_tree_state
+                    .selected_path
+                    .as_ref()
+                    .is_some_and(|selected| path_is_within_dir(selected, dir))
+                {
+                    *selected_row = Some(rows.len());
+                }
                 log::debug!(
                     target: "tty7::file_tree",
                     "render long file tree dir as inner scroll dir={} entries={} height={}",
@@ -128,7 +231,14 @@ impl Tty7App {
                 rows.push(file_tree_rows::long_dir_inner_scroll(dir, inner_rows, cx));
             }
             Ok(entries) => {
-                self.collect_file_tree_entries(tree, entries.as_ref(), depth, rows, cx);
+                self.collect_file_tree_entries(
+                    tree,
+                    entries.as_ref(),
+                    depth,
+                    rows,
+                    selected_row,
+                    cx,
+                );
             }
             Err(err) => rows.push(file_tree_rows::error_row(err, depth, cx)),
         }
@@ -244,5 +354,31 @@ impl Tty7App {
             .expanded_dirs
             .iter()
             .any(|expanded| expanded == path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_dirs_to_reveal_path_expands_ancestors_inside_root() {
+        let root = PathBuf::from("/workspace");
+        let path = root.join("src/ui/preview.rs");
+        let mut expanded = vec![root.join("src")];
+
+        expand_dirs_to_reveal_path(&root, &path, &mut expanded);
+
+        assert_eq!(expanded, vec![root.join("src"), root.join("src/ui")]);
+    }
+
+    #[test]
+    fn expand_dirs_to_reveal_path_ignores_paths_outside_root() {
+        let root = PathBuf::from("/workspace");
+        let mut expanded = Vec::new();
+
+        expand_dirs_to_reveal_path(&root, Path::new("/other/src/main.rs"), &mut expanded);
+
+        assert!(expanded.is_empty());
     }
 }
