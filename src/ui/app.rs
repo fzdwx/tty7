@@ -115,6 +115,12 @@ pub(crate) struct Renaming {
     _subs: Vec<Subscription>,
 }
 
+pub(crate) struct FileTreeRenaming {
+    pub(crate) path: PathBuf,
+    pub(crate) input: Entity<InputState>,
+    pub(crate) _subs: Vec<Subscription>,
+}
+
 pub struct Tty7App {
     /// The open tabs; each owns a split-pane tree and an optional name.
     pub(crate) tabs: Vec<Tab>,
@@ -165,6 +171,7 @@ pub struct Tty7App {
     pub(crate) closed: Vec<SessionTab>,
     /// `Some` while a tab label is being renamed inline; `None` otherwise.
     pub(crate) renaming: Option<Renaming>,
+    pub(crate) file_tree_renaming: Option<FileTreeRenaming>,
     /// When `Some`, the active tab renders only this one leaf full-window
     /// (Cmd+Shift+Enter maximize). Cleared on any structural / navigation change.
     pub(crate) maximized: Option<Entity<TerminalView>>,
@@ -256,6 +263,7 @@ impl Tty7App {
             file_search_index: None,
             closed: Vec::new(),
             renaming: None,
+            file_tree_renaming: None,
             maximized: None,
             mod_hint_badges: false,
             mod_hint_gen: 0,
@@ -1024,6 +1032,7 @@ impl Tty7App {
         // A rename in progress stores a fixed tab index; removing a tab shifts
         // indices and would let the pending edit commit onto the wrong tab. Drop it.
         self.renaming = None;
+        self.file_tree_renaming = None;
         if !self.tabs[index].is_settings() {
             let snapshot = tab_to_session(&self.tabs[index], cx);
             self.closed.push(snapshot);
@@ -1063,6 +1072,7 @@ impl Tty7App {
         // Reordering shifts indices; a pending rename keyed on a fixed index would
         // commit onto the wrong tab. Drop it.
         self.renaming = None;
+        self.file_tree_renaming = None;
         let was_active = self.active;
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);

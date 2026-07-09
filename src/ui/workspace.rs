@@ -62,6 +62,7 @@ impl Tty7App {
         self.file_tree_state = workspace.file_tree;
         self.maximized = None;
         self.renaming = None;
+        self.file_tree_renaming = None;
         self.focus_active(window, cx);
         self.save_session(cx);
         cx.notify();
@@ -130,6 +131,7 @@ impl Tty7App {
         self.file_tree_state = workspace.file_tree;
         self.maximized = None;
         self.renaming = None;
+        self.file_tree_renaming = None;
         self.focus_active(window, cx);
         self.save_session(cx);
         cx.notify();

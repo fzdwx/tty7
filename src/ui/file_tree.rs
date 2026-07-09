@@ -1,11 +1,19 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
-use gpui::{AnyElement, Context, MouseButton, MouseDownEvent, div, img, prelude::*, px};
-use gpui_component::{ActiveTheme as _, Icon, IconName};
+use gpui::{
+    AnyElement, ClipboardItem, Context, MouseButton, MouseDownEvent, PromptLevel, div, img,
+    prelude::*, px,
+};
+use gpui_component::input::Input;
+use gpui_component::input::{InputEvent, InputState};
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Size};
 
 use crate::core::file_tree::{FileTree, FileTreeEntry, FileTreeEntryKind};
-use crate::ui::app::Tty7App;
+use crate::ui::app::{FileTreeRenaming, Tty7App};
 use crate::ui::file_icons::{file_icon_path, file_symlink_icon_path, folder_icon_path};
 
 mod cache;
@@ -40,6 +48,134 @@ fn expand_dirs_to_reveal_path(root: &Path, path: &Path, expanded_dirs: &mut Vec<
 
 fn path_is_within_dir(path: &Path, dir: &Path) -> bool {
     path == dir || path.starts_with(dir)
+}
+
+fn unique_child_path(dir: &Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let (stem, extension) = name
+        .rsplit_once('.')
+        .map(|(stem, extension)| (stem, Some(extension)))
+        .unwrap_or((name, None));
+    for index in 2.. {
+        let name = match extension {
+            Some(extension) => format!("{stem} {index}.{extension}"),
+            None => format!("{stem} {index}"),
+        };
+        let candidate = dir.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded unique filename search must return")
+}
+
+fn reveal_in_file_manager(path: &Path) {
+    let target = path.parent().filter(|_| path.is_file()).unwrap_or(path);
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    if let Err(err) = std::process::Command::new(opener).arg(target).spawn() {
+        log::warn!("failed to reveal {}: {err}", path.display());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitTreeStatus {
+    Added,
+    Deleted,
+    Modified,
+    Renamed,
+    Untracked,
+}
+
+impl GitTreeStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Added => "A",
+            Self::Deleted => "D",
+            Self::Modified => "M",
+            Self::Renamed => "R",
+            Self::Untracked => "?",
+        }
+    }
+}
+
+#[derive(Default)]
+struct FileTreeGitStatus {
+    statuses: HashMap<PathBuf, GitTreeStatus>,
+}
+
+impl FileTreeGitStatus {
+    fn load(root: &Path) -> Self {
+        let Ok(output) = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["status", "--porcelain=v1", "-z"])
+            .output()
+        else {
+            return Self::default();
+        };
+        if !output.status.success() {
+            return Self::default();
+        }
+        Self {
+            statuses: parse_git_status_z(root, &output.stdout),
+        }
+    }
+
+    fn status_for(&self, path: &Path, is_dir: bool) -> Option<GitTreeStatus> {
+        if let Some(status) = self.statuses.get(path) {
+            return Some(*status);
+        }
+        is_dir.then(|| {
+            self.statuses
+                .iter()
+                .find_map(|(changed, status)| changed.starts_with(path).then_some(*status))
+        })?
+    }
+}
+
+fn parse_git_status_z(root: &Path, output: &[u8]) -> HashMap<PathBuf, GitTreeStatus> {
+    let mut statuses = HashMap::new();
+    let mut fields = output
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    while let Some(field) = fields.next() {
+        if field.len() < 4 {
+            continue;
+        }
+        let x = field[0] as char;
+        let y = field[1] as char;
+        let path = String::from_utf8_lossy(&field[3..]).into_owned();
+        let status = git_status_kind(x, y);
+        statuses.insert(root.join(path), status);
+        if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
+            let _ = fields.next();
+        }
+    }
+    statuses
+}
+
+fn git_status_kind(x: char, y: char) -> GitTreeStatus {
+    if x == '?' || y == '?' {
+        GitTreeStatus::Untracked
+    } else if x == 'A' || y == 'A' {
+        GitTreeStatus::Added
+    } else if x == 'D' || y == 'D' {
+        GitTreeStatus::Deleted
+    } else if x == 'R' || y == 'R' {
+        GitTreeStatus::Renamed
+    } else {
+        GitTreeStatus::Modified
+    }
 }
 
 impl Tty7App {
@@ -79,12 +215,19 @@ impl Tty7App {
         let started = Instant::now();
         let root = self.file_tree_root.clone();
         self.file_tree_cache.reset_to_root(&root);
+        let git_status = FileTreeGitStatus::load(&root);
         let mut rows = Vec::new();
         let mut selected_row = None;
         match FileTree::new(&root) {
-            Ok(tree) => {
-                self.collect_file_tree_rows(&tree, &root, 0, &mut rows, &mut selected_row, cx)
-            }
+            Ok(tree) => self.collect_file_tree_rows(
+                &tree,
+                &root,
+                &git_status,
+                0,
+                &mut rows,
+                &mut selected_row,
+                cx,
+            ),
             Err(err) => rows.push(
                 div()
                     .px_3()
@@ -140,6 +283,7 @@ impl Tty7App {
         &mut self,
         tree: &FileTree,
         dir: &Path,
+        git_status: &FileTreeGitStatus,
         depth: usize,
         rows: &mut Vec<AnyElement>,
         selected_row: &mut Option<usize>,
@@ -150,6 +294,7 @@ impl Tty7App {
                 self.collect_file_tree_entries(
                     tree,
                     entries.as_ref(),
+                    git_status,
                     depth,
                     rows,
                     selected_row,
@@ -164,6 +309,7 @@ impl Tty7App {
         &mut self,
         tree: &FileTree,
         entries: &[FileTreeEntry],
+        git_status: &FileTreeGitStatus,
         depth: usize,
         rows: &mut Vec<AnyElement>,
         selected_row: &mut Option<usize>,
@@ -179,11 +325,12 @@ impl Tty7App {
             {
                 *selected_row = Some(rows.len());
             }
-            rows.push(self.render_file_tree_entry(entry, depth, expanded, cx));
+            rows.push(self.render_file_tree_entry(entry, git_status, depth, expanded, cx));
             if entry.is_dir() && expanded {
                 self.collect_expanded_file_tree_dir(
                     tree,
                     &entry.path,
+                    git_status,
                     depth + 1,
                     rows,
                     selected_row,
@@ -197,6 +344,7 @@ impl Tty7App {
         &mut self,
         tree: &FileTree,
         dir: &Path,
+        git_status: &FileTreeGitStatus,
         depth: usize,
         rows: &mut Vec<AnyElement>,
         selected_row: &mut Option<usize>,
@@ -209,6 +357,7 @@ impl Tty7App {
                 self.collect_file_tree_entries(
                     tree,
                     entries.as_ref(),
+                    git_status,
                     depth,
                     &mut inner_rows,
                     &mut inner_selected_row,
@@ -235,6 +384,7 @@ impl Tty7App {
                 self.collect_file_tree_entries(
                     tree,
                     entries.as_ref(),
+                    git_status,
                     depth,
                     rows,
                     selected_row,
@@ -248,12 +398,16 @@ impl Tty7App {
     fn render_file_tree_entry(
         &self,
         entry: &FileTreeEntry,
+        git_status: &FileTreeGitStatus,
         depth: usize,
         expanded: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let path = entry.path.clone();
         let entry_is_dir = entry.is_dir();
+        let menu_path = path.clone();
+        let menu_is_dir = entry_is_dir;
+        let app = cx.entity().downgrade();
         let selected = self
             .file_tree_state
             .selected_path
@@ -283,6 +437,42 @@ impl Tty7App {
             None
         };
         let has_chevron = chevron.is_some();
+        let git_badge = git_status.status_for(&entry.path, entry_is_dir);
+        let renaming_input = self
+            .file_tree_renaming
+            .as_ref()
+            .filter(|renaming| renaming.path == entry.path)
+            .map(|renaming| renaming.input.clone());
+        let name_region = if let Some(input) = renaming_input {
+            div()
+                .min_w_0()
+                .flex_1()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(Input::new(&input).appearance(false))
+                .into_any_element()
+        } else {
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .child(entry.name.clone())
+                .into_any_element()
+        };
+        let status_region = match git_badge {
+            Some(status) => div()
+                .w(px(14.))
+                .flex_none()
+                .text_xs()
+                .text_color(match status {
+                    GitTreeStatus::Added => cx.theme().success,
+                    GitTreeStatus::Deleted => cx.theme().danger,
+                    GitTreeStatus::Modified | GitTreeStatus::Renamed => cx.theme().warning,
+                    GitTreeStatus::Untracked => cx.theme().muted_foreground,
+                })
+                .child(status.label())
+                .into_any_element(),
+            None => div().w(px(14.)).flex_none().into_any_element(),
+        };
 
         div()
             .h(px(file_tree_rows::ROW_HEIGHT))
@@ -321,8 +511,290 @@ impl Tty7App {
             }))
             .when(!has_chevron, |row| row.child(div().size(px(13.))))
             .child(entry_icon)
-            .child(div().min_w_0().truncate().child(entry.name.clone()))
+            .child(name_region)
+            .child(status_region)
+            .context_menu(move |menu, _window, _cx| {
+                let target_dir = if menu_is_dir {
+                    menu_path.clone()
+                } else {
+                    menu_path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| menu_path.clone())
+                };
+                let new_file_app = app.clone();
+                let new_file_dir = target_dir.clone();
+                let new_folder_app = app.clone();
+                let new_folder_dir = target_dir.clone();
+                let rename_app = app.clone();
+                let rename_path = menu_path.clone();
+                let delete_app = app.clone();
+                let delete_path = menu_path.clone();
+                let copy_app = app.clone();
+                let copy_path = menu_path.clone();
+                let reveal_app = app.clone();
+                let reveal_path = menu_path.clone();
+
+                menu.with_size(Size::Small)
+                    .min_w(px(220.))
+                    .item(
+                        PopupMenuItem::new("New File").on_click(move |_, window, cx| {
+                            if let Some(app) = new_file_app.upgrade() {
+                                app.update(cx, |this, cx| {
+                                    this.create_file_tree_entry(
+                                        new_file_dir.clone(),
+                                        false,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("New Folder").on_click(move |_, window, cx| {
+                            if let Some(app) = new_folder_app.upgrade() {
+                                app.update(cx, |this, cx| {
+                                    this.create_file_tree_entry(
+                                        new_folder_dir.clone(),
+                                        true,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                    )
+                    .separator()
+                    .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+                        if let Some(app) = rename_app.upgrade() {
+                            app.update(cx, |this, cx| {
+                                this.start_file_tree_rename(rename_path.clone(), window, cx);
+                            });
+                        }
+                    }))
+                    .item(PopupMenuItem::new("Delete").on_click(move |_, window, cx| {
+                        if let Some(app) = delete_app.upgrade() {
+                            app.update(cx, |this, cx| {
+                                this.delete_file_tree_path(delete_path.clone(), window, cx);
+                            });
+                        }
+                    }))
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Copy Path").on_click(move |_, _window, cx| {
+                            if let Some(app) = copy_app.upgrade() {
+                                app.update(cx, |_this, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        copy_path.display().to_string(),
+                                    ));
+                                });
+                            }
+                        }),
+                    )
+                    .item(PopupMenuItem::new("Reveal in File Manager").on_click(
+                        move |_, _window, cx| {
+                            if let Some(app) = reveal_app.upgrade() {
+                                app.update(cx, |_this, _cx| {
+                                    reveal_in_file_manager(&reveal_path);
+                                });
+                            }
+                        },
+                    ))
+            })
             .into_any_element()
+    }
+
+    pub(crate) fn start_file_tree_rename(
+        &mut self,
+        path: PathBuf,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        input.update(cx, |state, cx| state.focus(window, cx));
+        let subs = vec![cx.subscribe_in(
+            &input,
+            window,
+            |this, _input, ev: &InputEvent, window, cx| match ev {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    this.commit_file_tree_rename(window, cx)
+                }
+                _ => {}
+            },
+        )];
+        self.file_tree_renaming = Some(FileTreeRenaming {
+            path,
+            input,
+            _subs: subs,
+        });
+        cx.notify();
+    }
+
+    fn commit_file_tree_rename(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let Some(renaming) = self.file_tree_renaming.take() else {
+            return;
+        };
+        let value = renaming.input.read(cx).value().trim().to_string();
+        if value.is_empty() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(parent) = renaming.path.parent() else {
+            return;
+        };
+        let target = parent.join(value);
+        if target == renaming.path {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        if target.exists() {
+            self.warn_file_tree_error(
+                "Rename Failed",
+                format!("{} already exists", target.display()),
+                window,
+                cx,
+            );
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        match std::fs::rename(&renaming.path, &target) {
+            Ok(()) => {
+                self.update_file_tree_paths_after_rename(&renaming.path, &target);
+                self.file_tree_cache.clear();
+                self.file_search_index = None;
+                self.save_session(cx);
+            }
+            Err(err) => self.warn_file_tree_error("Rename Failed", err.to_string(), window, cx),
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn create_file_tree_entry(
+        &mut self,
+        dir: PathBuf,
+        directory: bool,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = unique_child_path(
+            &dir,
+            if directory {
+                "untitled"
+            } else {
+                "untitled.txt"
+            },
+        );
+        let result = if directory {
+            std::fs::create_dir(&path)
+        } else {
+            std::fs::File::create(&path).map(|_| ())
+        };
+        match result {
+            Ok(()) => {
+                if !self
+                    .file_tree_state
+                    .expanded_dirs
+                    .iter()
+                    .any(|expanded| expanded == &dir)
+                {
+                    self.file_tree_state.expanded_dirs.push(dir);
+                }
+                self.file_tree_state.selected_path = Some(path.clone());
+                self.file_tree_cache.clear();
+                self.file_search_index = None;
+                self.start_file_tree_rename(path, window, cx);
+                self.save_session(cx);
+            }
+            Err(err) => self.warn_file_tree_error("Create Failed", err.to_string(), window, cx),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn delete_file_tree_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message = format!("Delete {}?", path.display());
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Delete File Tree Entry?",
+            Some(&message),
+            &["Cancel", "Delete"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if !matches!(answer.await, Ok(1)) {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                let result = if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                match result {
+                    Ok(()) => {
+                        this.file_tree_state.selected_path = None;
+                        this.file_tree_state
+                            .expanded_dirs
+                            .retain(|expanded| !path_is_within_dir(expanded, &path));
+                        this.file_tree_cache.clear();
+                        this.file_search_index = None;
+                        this.save_session(cx);
+                    }
+                    Err(err) => {
+                        log::warn!("delete file tree entry failed {}: {err}", path.display())
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn update_file_tree_paths_after_rename(&mut self, from: &Path, to: &Path) {
+        if self
+            .file_tree_state
+            .selected_path
+            .as_ref()
+            .is_some_and(|selected| selected == from)
+        {
+            self.file_tree_state.selected_path = Some(to.to_path_buf());
+        }
+        for expanded in &mut self.file_tree_state.expanded_dirs {
+            if expanded == from {
+                *expanded = to.to_path_buf();
+            } else if let Ok(rest) = expanded.strip_prefix(from) {
+                *expanded = to.join(rest);
+            }
+        }
+    }
+
+    fn warn_file_tree_error(
+        &self,
+        title: &'static str,
+        message: String,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prompt = window.prompt(PromptLevel::Warning, title, Some(&message), &["OK"], cx);
+        cx.spawn(async move |_this, _cx| {
+            let _ = prompt.await;
+        })
+        .detach();
     }
 
     fn toggle_file_tree_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -381,5 +853,57 @@ mod tests {
         expand_dirs_to_reveal_path(&root, Path::new("/other/src/main.rs"), &mut expanded);
 
         assert!(expanded.is_empty());
+    }
+
+    #[test]
+    fn unique_child_path_adds_suffix_before_extension() {
+        let root = temp_dir("unique-child");
+        std::fs::write(root.join("untitled.txt"), "").unwrap();
+        std::fs::write(root.join("untitled 2.txt"), "").unwrap();
+
+        let path = unique_child_path(&root, "untitled.txt");
+
+        assert_eq!(path, root.join("untitled 3.txt"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn parse_git_status_z_maps_statuses_to_absolute_paths() {
+        let root = PathBuf::from("/repo");
+        let statuses = parse_git_status_z(
+            &root,
+            b" M src/main.rs\0A  src/lib.rs\0?? notes.md\0R  new.rs\0old.rs\0",
+        );
+
+        assert_eq!(
+            statuses.get(&root.join("src/main.rs")),
+            Some(&GitTreeStatus::Modified)
+        );
+        assert_eq!(
+            statuses.get(&root.join("src/lib.rs")),
+            Some(&GitTreeStatus::Added)
+        );
+        assert_eq!(
+            statuses.get(&root.join("notes.md")),
+            Some(&GitTreeStatus::Untracked)
+        );
+        assert_eq!(
+            statuses.get(&root.join("new.rs")),
+            Some(&GitTreeStatus::Renamed)
+        );
+        assert!(!statuses.contains_key(&root.join("old.rs")));
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tty7-file-tree-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
     }
 }
