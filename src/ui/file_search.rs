@@ -6,7 +6,7 @@ use gpui::{
     div, img, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IndexPath, h_flex,
+    ActiveTheme as _, IndexPath, StyledExt as _, h_flex,
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
     v_flex,
 };
@@ -102,6 +102,27 @@ impl ListDelegate for FileSearchDelegate {
         )
     }
 
+    fn render_empty(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> impl IntoElement {
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child("No matching files")
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground.opacity(0.75))
+                    .child("Try a different path or filename"),
+            )
+    }
+
     fn set_selected_index(
         &mut self,
         ix: Option<IndexPath>,
@@ -114,17 +135,54 @@ impl ListDelegate for FileSearchDelegate {
 }
 
 pub struct FileSearchView {
-    list: Entity<ListState<FileSearchDelegate>>,
-    _sub: Subscription,
+    root: PathBuf,
+    list: Option<Entity<ListState<FileSearchDelegate>>>,
+    error: Option<String>,
+    _sub: Option<Subscription>,
 }
 
 impl FileSearchView {
-    pub fn new(index: Rc<FileSearchIndex>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn loading(root: PathBuf) -> Self {
+        Self {
+            root,
+            list: None,
+            error: None,
+            _sub: None,
+        }
+    }
+
+    pub fn ready(
+        root: PathBuf,
+        index: Rc<FileSearchIndex>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::loading(root);
+        view.set_index(index, window, cx);
+        view
+    }
+
+    pub fn set_index(
+        &mut self,
+        index: Rc<FileSearchIndex>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let delegate = FileSearchDelegate::new(index);
         let list = cx.new(|cx| ListState::new(delegate, window, cx).searchable(true));
         list.update(cx, |state, cx| state.focus(window, cx));
         let _sub = cx.subscribe_in(&list, window, Self::on_list_event);
-        Self { list, _sub }
+        self.list = Some(list);
+        self.error = None;
+        self._sub = Some(_sub);
+        cx.notify();
+    }
+
+    pub fn set_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.list = None;
+        self.error = Some(message);
+        self._sub = None;
+        cx.notify();
     }
 
     fn on_list_event(
@@ -150,6 +208,35 @@ impl EventEmitter<FileSearchEvent> for FileSearchView {}
 impl Render for FileSearchView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let content = if let Some(list) = self.list.as_ref() {
+            List::new(list).p_1().max_h(px(520.)).into_any_element()
+        } else if let Some(error) = self.error.as_ref() {
+            v_flex()
+                .gap_2()
+                .p_4()
+                .text_sm()
+                .child(div().font_bold().child("Open File Failed"))
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child(error.clone()),
+                )
+                .into_any_element()
+        } else {
+            v_flex()
+                .gap_2()
+                .p_4()
+                .text_sm()
+                .child(div().font_bold().child("Indexing Files"))
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .truncate()
+                        .child(self.root.display().to_string()),
+                )
+                .into_any_element()
+        };
+
         let card = v_flex()
             .w(px(680.))
             .max_h(px(520.))
@@ -159,7 +246,7 @@ impl Render for FileSearchView {
             .rounded_lg()
             .shadow_lg()
             .overflow_hidden()
-            .child(List::new(&self.list).p_1().max_h(px(520.)));
+            .child(content);
 
         div()
             .absolute()

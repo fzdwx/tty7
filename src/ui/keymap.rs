@@ -72,6 +72,7 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("DecreaseFontSize", "secondary--"),
         ("ResetFontSize", "secondary-0"),
         ("TogglePalette", "secondary-p"),
+        ("OpenFileSearch", "secondary-shift-o"),
         ("ReopenClosedTab", "secondary-shift-t"),
         // ⌘⏎ toggles window fullscreen and ⌘⇧⏎ zooms the focused pane, matching
         // Ghostty's and iTerm2's defaults — pane zoom deliberately does NOT own
@@ -190,6 +191,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "DecreaseFontSize" => KeyBinding::new(keystroke, DecreaseFontSize, None),
         "ResetFontSize" => KeyBinding::new(keystroke, ResetFontSize, None),
         "TogglePalette" => KeyBinding::new(keystroke, TogglePalette, None),
+        "OpenFileSearch" => KeyBinding::new(keystroke, OpenFileSearch, None),
         "ReopenClosedTab" => KeyBinding::new(keystroke, ReopenClosedTab, None),
         "ToggleMaximizePane" => KeyBinding::new(keystroke, ToggleMaximizePane, None),
         "ToggleFullscreen" => KeyBinding::new(keystroke, ToggleFullscreen, None),

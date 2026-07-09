@@ -1277,38 +1277,49 @@ impl Tty7App {
         }
 
         let root = self.file_tree_root.clone();
-        let index = match self.file_search_index.as_ref() {
-            Some((cached_root, index)) if cached_root == &root => Ok(index.clone()),
-            _ => crate::core::file_search::FileSearchIndex::new(&root).map(|index| {
-                let index = Rc::new(index);
-                self.file_search_index = Some((root.clone(), index.clone()));
-                index
-            }),
-        };
-
-        match index {
-            Ok(index) => {
-                let view = cx.new(|cx| FileSearchView::new(index, window, cx));
-                self.file_search_sub =
-                    Some(cx.subscribe_in(&view, window, Self::on_file_search_event));
-                self.file_search = Some(view);
-                cx.notify();
-            }
-            Err(err) => {
-                let message = err.to_string();
-                let prompt = window.prompt(
-                    PromptLevel::Warning,
-                    "Open File Failed",
-                    Some(&message),
-                    &["OK"],
-                    cx,
-                );
-                cx.spawn(async move |_this, _cx| {
-                    let _ = prompt.await;
-                })
-                .detach();
-            }
+        if let Some((cached_root, index)) = self.file_search_index.as_ref()
+            && cached_root == &root
+        {
+            let view = cx.new(|cx| FileSearchView::ready(root, index.clone(), window, cx));
+            self.file_search_sub = Some(cx.subscribe_in(&view, window, Self::on_file_search_event));
+            self.file_search = Some(view);
+            cx.notify();
+            return;
         }
+
+        let view = cx.new(|_| FileSearchView::loading(root.clone()));
+        self.file_search_sub = Some(cx.subscribe_in(&view, window, Self::on_file_search_event));
+        self.file_search = Some(view.clone());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_spawn({
+                    let root = root.clone();
+                    async move { crate::core::file_search::FileSearchIndex::new(&root) }
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if !this
+                    .file_search
+                    .as_ref()
+                    .is_some_and(|current| current.entity_id() == view.entity_id())
+                {
+                    return;
+                }
+                match loaded {
+                    Ok(index) => {
+                        let index = Rc::new(index);
+                        this.file_search_index = Some((root.clone(), index.clone()));
+                        view.update(cx, |view, cx| view.set_index(index, window, cx));
+                    }
+                    Err(err) => {
+                        view.update(cx, |view, cx| view.set_error(err.to_string(), cx));
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     fn on_file_search_event(
@@ -2002,6 +2013,11 @@ impl Render for Tty7App {
             .on_action(cx.listener(|this, _: &ResetFontSize, _window, cx| this.reset_font_size(cx)))
             .on_action(
                 cx.listener(|this, _: &TogglePalette, window, cx| this.toggle_palette(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &OpenFileSearch, window, cx| {
+                    this.open_file_search(window, cx)
+                }),
             )
             .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
                 this.reopen_closed_tab(window, cx)

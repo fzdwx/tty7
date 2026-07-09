@@ -65,6 +65,7 @@ impl CommandKind {
             SplitDown => "SplitDown",
             ClosePane => "CloseActiveTab",
             ResetFontSize => "ResetFontSize",
+            OpenFileSearch => "OpenFileSearch",
             NextPane => "FocusNextPane",
             PrevPane => "FocusPrevPane",
             ToggleMaximizePane => "ToggleMaximizePane",
@@ -73,8 +74,9 @@ impl CommandKind {
             ReopenClosedTab => "ReopenClosedTab",
             OpenSettings => "OpenSettings",
             RestartDaemon => "RestartDaemon",
-            OpenFileSearch | FindInTerminal | RefreshFileTree | OpenThemePicker | SetTheme(_)
-            | ActivateTab(_) => return None,
+            FindInTerminal | RefreshFileTree | OpenThemePicker | SetTheme(_) | ActivateTab(_) => {
+                return None;
+            }
         })
     }
 }

@@ -18,6 +18,7 @@ actions!(
         DecreaseFontSize,
         ResetFontSize,
         TogglePalette,
+        OpenFileSearch,
         ReopenClosedTab,
         ToggleMaximizePane,
         ToggleFullscreen,

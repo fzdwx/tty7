@@ -36,10 +36,11 @@ const LOGO_PX: f32 = 20.0;
 /// The curated shortcuts taught on the home page: (action name, label). A
 /// deliberate subset — the full table lives in Settings → Keybindings; this is
 /// a watermark, not documentation.
-const HOME_SHORTCUTS: [(&str, &str); 6] = [
+const HOME_SHORTCUTS: [(&str, &str); 7] = [
     ("NewTab", "New Tab"),
     ("ReopenClosedTab", "Reopen Closed Tab"),
     ("TogglePalette", "Command Palette"),
+    ("OpenFileSearch", "Open File"),
     ("SplitRight", "Split Right"),
     ("SplitDown", "Split Down"),
     ("OpenSettings", "Settings"),
