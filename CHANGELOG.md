@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-10
+
+### Added
+
+- Terminal ANSI colors (`color0`–`color15`) can now be overridden individually
+  via `ansi_colors.*` in `config.json`, layered on top of the active theme
+  preset — with a color picker per slot under Settings → Appearance → ANSI
+  Colors. Malformed values are ignored, and clearing an override falls back to
+  the preset's palette. (#37)
+
+- Font ligatures can now be enabled for terminal text. A new optional
+  `font_features` config passes OpenType features (e.g. `{"calt": true}`)
+  through to the renderer, and Settings → Appearance grows a toggle for the
+  common `calt`/`liga` pair. Ligatures stay disabled by default for cell-grid
+  safety, and changes hot-apply to open panes. (#38)
+
+### Fixed
+
+- Ctrl+L now clears the screen while the prompt-local line editor is active.
+  The readline dispatcher used to swallow it as an unrecognized chord; it now
+  forwards the same form-feed byte the raw terminal path sends, so the shell
+  repaints its prompt as expected. (#36)
+
 ## [0.6.2] - 2026-07-08
 
 ### Changed
@@ -262,7 +285,8 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
-[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/l0ng-ai/tty7/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/l0ng-ai/tty7/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/l0ng-ai/tty7/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/l0ng-ai/tty7/compare/v0.5.0...v0.6.0
