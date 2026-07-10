@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-10
+
 ### Changed
 
 - Ctrl+R history search is now a browsable menu: matching is fuzzy
