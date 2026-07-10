@@ -1,13 +1,7 @@
 use std::path::PathBuf;
 
+use super::test_support::{lock_session_file, pin_config_dir};
 use super::*;
-
-fn pin_config_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).ok();
-    crate::core::config::set_config_dir(dir.clone());
-    dir
-}
 
 #[test]
 fn session_json_round_trips_nested_tree() {
@@ -141,6 +135,7 @@ fn session_defaults_fill_missing_fields() {
 
 #[test]
 fn save_then_load_recovers_the_session() {
+    let _file = lock_session_file();
     pin_config_dir();
     let session = Session::from_tabs(
         0,

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-10
+
+### Changed
+
+- Ctrl+R history search is now a browsable menu: matching is fuzzy
+  (subsequence with word-boundary/consecutive bonuses; space-separated terms
+  must all match) blended with frecency, and the ranked candidates float
+  beside the prompt — matched characters highlighted, selection moved by
+  Ctrl+R/↓ and Ctrl+S/↑, Enter to edit, Cmd+Enter to run outright. An empty
+  query lists the whole history by frecency, so bare Ctrl+R is a "recent &
+  relevant" browser. The classic `(reverse-i-search)` line stays. (#45)
+- History records now carry when the command ran and its exit code: new
+  entries are `<ts>\t<exit>\t<cwd>\t<command>`, written when the command
+  *finishes* (zsh `INC_APPEND_HISTORY_TIME`-style, exit code sniffed from
+  OSC 133;D daemon-side); older formats still load. The Ctrl+R menu shows
+  "ran 3h ago" and a `✗` badge on commands whose last run failed; timestamps
+  from zsh/bash history files are carried over when seeding. (#45)
+
+## [0.8.0] - 2026-07-10
+
+### Added
+
+- Copy on select: an opt-in Settings → Terminal → Clipboard toggle (config
+  key `copy_on_select`) that copies a mouse selection — drag, double-click
+  word, or triple-click line, over terminal output or the prompt's command
+  editor — to the clipboard the moment the gesture ends, no ⌘C needed. Off
+  by default so a stray selection never overwrites the clipboard. (#34)
+
+### Fixed
+
+- The held-⌘ tab-number badges no longer stick on after the window loses key
+  status mid-hold (⌘-Tab, Spotlight, a click into another app). The ⌘ release
+  goes to whatever app is key by then, so the window never saw it; the badges
+  — and any pending reveal — are now dismissed on the activation flip itself.
+
 ## [0.7.0] - 2026-07-10
 
 ### Added
@@ -285,7 +320,8 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
-[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/l0ng-ai/tty7/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/l0ng-ai/tty7/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/l0ng-ai/tty7/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/l0ng-ai/tty7/compare/v0.6.0...v0.6.1

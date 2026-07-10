@@ -341,4 +341,23 @@ fn tab_cwd(tab: &SessionTab) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard};
+
+    static SESSION_FILE: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn lock_session_file() -> MutexGuard<'static, ()> {
+        SESSION_FILE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn pin_config_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        crate::core::config::set_config_dir(dir.clone());
+        dir
+    }
+}
+
+#[cfg(test)]
 mod tests;
