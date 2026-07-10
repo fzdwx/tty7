@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-10
+
 ### Added
 
 - Copy on select: an opt-in Settings → Terminal → Clipboard toggle (config
@@ -300,7 +302,8 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
-[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/l0ng-ai/tty7/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/l0ng-ai/tty7/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/l0ng-ai/tty7/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/l0ng-ai/tty7/compare/v0.6.0...v0.6.1
