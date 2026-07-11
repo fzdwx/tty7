@@ -25,7 +25,7 @@ use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
 use crate::terminal::view::{ChildExited, CwdChanged, TerminalView};
 use crate::ui::file_search::{FileSearchEvent, FileSearchView};
-use crate::ui::file_tree::FileTreeCache;
+use crate::ui::file_tree::{FileTreeCache, FileTreeGitStatusCache};
 use crate::ui::palette::{Command, CommandKind, PaletteEvent, PaletteView};
 use crate::ui::pane::{CloseOutcome, Pane};
 use crate::ui::preview::FilePreview;
@@ -138,6 +138,7 @@ pub struct Tty7App {
     pub(crate) file_tree_root: PathBuf,
     pub(crate) file_tree_state: SessionFileTreeState,
     pub(crate) file_tree_cache: FileTreeCache,
+    pub(crate) file_tree_git_status: FileTreeGitStatusCache,
     pub(crate) file_tree_scroll_handle: ScrollHandle,
     pub(crate) pending_file_tree_reveal: Option<PathBuf>,
     /// Current global font size (px), applied to every pane in every tab.
@@ -287,6 +288,7 @@ impl Tty7App {
             file_tree_root,
             file_tree_state,
             file_tree_cache: FileTreeCache::default(),
+            file_tree_git_status: FileTreeGitStatusCache::default(),
             file_tree_scroll_handle: ScrollHandle::new(),
             pending_file_tree_reveal: None,
             font_size,

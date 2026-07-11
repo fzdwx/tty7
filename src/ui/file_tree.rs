@@ -1,6 +1,4 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 use gpui::{
@@ -17,11 +15,14 @@ use crate::ui::app::{FileTreeRenaming, Tty7App};
 use crate::ui::file_icons::{file_icon_path, file_symlink_icon_path, folder_icon_path};
 
 mod cache;
+mod git_status;
 mod rows;
 
 use rows as file_tree_rows;
 
 pub(crate) use cache::FileTreeCache;
+pub(crate) use git_status::FileTreeGitStatusCache;
+use git_status::{FileTreeGitStatus, GitTreeStatus};
 
 fn expand_dirs_to_reveal_path(root: &Path, path: &Path, expanded_dirs: &mut Vec<PathBuf>) {
     if !path.starts_with(root) {
@@ -87,98 +88,29 @@ fn reveal_in_file_manager(path: &Path) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GitTreeStatus {
-    Added,
-    Deleted,
-    Modified,
-    Renamed,
-    Untracked,
-}
-
-impl GitTreeStatus {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Added => "A",
-            Self::Deleted => "D",
-            Self::Modified => "M",
-            Self::Renamed => "R",
-            Self::Untracked => "?",
-        }
-    }
-}
-
-#[derive(Default)]
-struct FileTreeGitStatus {
-    statuses: HashMap<PathBuf, GitTreeStatus>,
-}
-
-impl FileTreeGitStatus {
-    fn load(root: &Path) -> Self {
-        let Ok(output) = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["status", "--porcelain=v1", "-z"])
-            .output()
-        else {
-            return Self::default();
-        };
-        if !output.status.success() {
-            return Self::default();
-        }
-        Self {
-            statuses: parse_git_status_z(root, &output.stdout),
-        }
-    }
-
-    fn status_for(&self, path: &Path, is_dir: bool) -> Option<GitTreeStatus> {
-        if let Some(status) = self.statuses.get(path) {
-            return Some(*status);
-        }
-        is_dir.then(|| {
-            self.statuses
-                .iter()
-                .find_map(|(changed, status)| changed.starts_with(path).then_some(*status))
-        })?
-    }
-}
-
-fn parse_git_status_z(root: &Path, output: &[u8]) -> HashMap<PathBuf, GitTreeStatus> {
-    let mut statuses = HashMap::new();
-    let mut fields = output
-        .split(|byte| *byte == 0)
-        .filter(|field| !field.is_empty());
-    while let Some(field) = fields.next() {
-        if field.len() < 4 {
-            continue;
-        }
-        let x = field[0] as char;
-        let y = field[1] as char;
-        let path = String::from_utf8_lossy(&field[3..]).into_owned();
-        let status = git_status_kind(x, y);
-        statuses.insert(root.join(path), status);
-        if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
-            let _ = fields.next();
-        }
-    }
-    statuses
-}
-
-fn git_status_kind(x: char, y: char) -> GitTreeStatus {
-    if x == '?' || y == '?' {
-        GitTreeStatus::Untracked
-    } else if x == 'A' || y == 'A' {
-        GitTreeStatus::Added
-    } else if x == 'D' || y == 'D' {
-        GitTreeStatus::Deleted
-    } else if x == 'R' || y == 'R' {
-        GitTreeStatus::Renamed
-    } else {
-        GitTreeStatus::Modified
-    }
-}
-
 impl Tty7App {
+    fn refresh_file_tree_git_status(&mut self, force: bool, cx: &mut Context<Self>) {
+        let root = self.file_tree_root.clone();
+        let Some(generation) = self.file_tree_git_status.begin_refresh(&root, force) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let load_root = root.clone();
+            let status = cx
+                .background_spawn(async move { FileTreeGitStatus::load(&load_root) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app
+                    .file_tree_git_status
+                    .finish_refresh(&root, generation, status)
+                {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn refresh_file_tree(&mut self, cx: &mut Context<Self>) {
         log::debug!(
             target: "tty7::file_tree",
@@ -187,6 +119,7 @@ impl Tty7App {
         );
         self.file_tree_cache.clear();
         self.file_search_index = None;
+        self.refresh_file_tree_git_status(true, cx);
         cx.notify();
     }
 
@@ -215,7 +148,8 @@ impl Tty7App {
         let started = Instant::now();
         let root = self.file_tree_root.clone();
         self.file_tree_cache.reset_to_root(&root);
-        let git_status = FileTreeGitStatus::load(&root);
+        self.refresh_file_tree_git_status(false, cx);
+        let git_status = self.file_tree_git_status.snapshot();
         let mut rows = Vec::new();
         let mut selected_row = None;
         match FileTree::new(&root) {
@@ -865,33 +799,6 @@ mod tests {
 
         assert_eq!(path, root.join("untitled 3.txt"));
         std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn parse_git_status_z_maps_statuses_to_absolute_paths() {
-        let root = PathBuf::from("/repo");
-        let statuses = parse_git_status_z(
-            &root,
-            b" M src/main.rs\0A  src/lib.rs\0?? notes.md\0R  new.rs\0old.rs\0",
-        );
-
-        assert_eq!(
-            statuses.get(&root.join("src/main.rs")),
-            Some(&GitTreeStatus::Modified)
-        );
-        assert_eq!(
-            statuses.get(&root.join("src/lib.rs")),
-            Some(&GitTreeStatus::Added)
-        );
-        assert_eq!(
-            statuses.get(&root.join("notes.md")),
-            Some(&GitTreeStatus::Untracked)
-        );
-        assert_eq!(
-            statuses.get(&root.join("new.rs")),
-            Some(&GitTreeStatus::Renamed)
-        );
-        assert!(!statuses.contains_key(&root.join("old.rs")));
     }
 
     fn temp_dir(label: &str) -> PathBuf {
