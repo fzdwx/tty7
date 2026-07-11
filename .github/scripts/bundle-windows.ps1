@@ -21,6 +21,8 @@ Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 
 Copy-Item "target/$Target/release/tty7.exe" "$Stage/tty7.exe"
+Copy-Item "target/$Target/release/conpty.dll" "$Stage/conpty.dll"
+Copy-Item "target/$Target/release/OpenConsole.exe" "$Stage/OpenConsole.exe"
 New-Item -ItemType Directory -Force -Path "$Stage/completions" | Out-Null
 Copy-Item "assets/completions/*.json" "$Stage/completions/"
 Copy-Item LICENSE "$Stage/LICENSE.txt"

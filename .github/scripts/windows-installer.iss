@@ -47,6 +47,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#StageDir}\tty7.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\conpty.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\OpenConsole.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\completions\*"; DestDir: "{app}\completions"; Flags: ignoreversion recursesubdirs
 Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
