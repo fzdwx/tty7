@@ -7,14 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-11
+
 ### Added
 
+- Tab completion now executes the completion specs' *dynamic generators*:
+  positions whose candidates come from the live system get real values — git
+  branches on `git checkout <Tab>`, container names for docker/podman,
+  `package.json` scripts for npm/pnpm/bun/yarn, cargo/rustup/tmux/brew/apt/pip
+  listings, and more. Scripts run off the main thread in the session's cwd
+  (800 ms timeout, output capped, short-lived cache) and their results merge
+  into the already-open menu as they arrive; a slow or failing generator just
+  contributes nothing. (#52)
 - When shell integration never engages in a pane, pressing Ctrl+R now explains
   why the history menu can't appear (once per pane, dismissed by the next
   keystroke) instead of failing silently — naming the wrapper when a
   figterm-style PTY shim (`kiro-cli-term`, `figterm`, `qterm`) is intercepting
   the shell's OSC 133 reports. The chord still reaches the shell, so its own
   reverse-i-search keeps working. (#46)
+
+### Fixed
+
+- `ssh <Tab>` (and scp/sftp/rsync) now completes host aliases from
+  `~/.ssh/config` — `Include` files honored, wildcard patterns skipped — and
+  hosts from `known_hosts`, instead of falling back to listing the current
+  directory. (#51)
 
 ## [0.9.0] - 2026-07-10
 
@@ -329,7 +346,9 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
-[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/l0ng-ai/tty7/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/l0ng-ai/tty7/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/l0ng-ai/tty7/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/l0ng-ai/tty7/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/l0ng-ai/tty7/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/l0ng-ai/tty7/compare/v0.6.1...v0.6.2
